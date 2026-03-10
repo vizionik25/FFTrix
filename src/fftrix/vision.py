@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import os
+from vidgear.gears import CamGear, VideoGear, WriteGear, NetGear
 
 def detect_edges(frame):
     """Perform Canny Edge Detection."""
@@ -11,7 +12,6 @@ def detect_edges(frame):
 def detect_motion(frame, background_subtractor):
     """Detect motion using background subtraction."""
     fg_mask = background_subtractor.apply(frame)
-    # Perform some noise reduction
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
     return cv2.cvtColor(fg_mask, cv2.COLOR_GRAY2BGR)
@@ -24,91 +24,88 @@ def detect_faces(frame, face_cascade):
         cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
     return frame
 
-def detect_objects_dnn(frame, net, classes):
-    """Detect objects using a DNN model (e.g., SSD MobileNet)."""
-    (h, w) = frame.shape[:2]
-    blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 0.007843, (300, 300), 127.5)
-    net.setInput(blob)
-    detections = net.forward()
-
-    for i in range(0, detections.shape[2]):
-        confidence = detections[0, 0, i, 2]
-        if confidence > 0.2:
-            idx = int(detections[0, 0, i, 1])
-            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-            (startX, startY, endX, endY) = box.astype("int")
-            label = f"{classes[idx]}: {confidence*100:.2f}%"
-            cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
-            cv2.putText(frame, label, (startX, startY - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-    return frame
-
 from .face_recognition import FaceRecognizer
-from .ocr import detect_text_areas
-from .segmentation import remove_background_mog2, chroma_key, replace_background
+from .ocr import perform_ocr
+from .segmentation import remove_background_mog2, chroma_key
 
-def run_vision_loop(source=0, mode='edge'):
+def run_vision_loop(source=0, mode='edge', record_path=None, stream_address=None, stabilize=False):
     """
-    Run a video processing loop.
-    Modes: 'edge', 'motion', 'face', 'recognize', 'object', 'ocr', 'rembg', 'chroma'
+    Enhanced Video processing loop using VidGear.
+    Modes: 'edge', 'motion', 'face', 'recognize', 'ocr', 'rembg', 'chroma'
     """
-    cap = cv2.VideoCapture(source)
-    if not cap.isOpened():
-        print(f"Error: Could not open video source {source}")
-        return
-
-    # Initialize tools based on mode
-    back_sub = cv2.createBackgroundSubtractorMOG2() if mode in ['motion', 'rembg'] else None
+    # 1. High-Performance Streaming & 4. Stabilization
+    options = {}
+    if stabilize:
+        options["stabilize"] = True
     
-    # For chroma key, we might want a replacement background
-    replacement_bg = None
-    if mode == 'chroma':
-        # Create a simple blue background if none provided
-        replacement_bg = np.zeros((480, 640, 3), np.uint8)
-        replacement_bg[:] = (255, 0, 0) # Blue
-        # Green screen range (HSV)
-        lower_green = np.array([35, 100, 100])
-        upper_green = np.array([85, 255, 255])
+    # Add optimizations for IP Cameras / Network Streams
+    if isinstance(source, str) and (source.startswith('rtsp') or source.startswith('http')):
+        options.update({
+            "THREADED_QUEUE_MODE": True, # Prevents blocking
+            "rtsp_transport": "tcp",     # More stable than UDP for many IPCams
+            "REORDER_QUEUE_MODE": True   # Ensures frames are in order
+        })
+    
+    # VideoGear automatically chooses between CamGear and other gears
+    stream = VideoGear(source=source, **options).start()
+    
+    # 2. High-Performance Recording (WriteGear)
+    writer = None
+    if record_path:
+        # Compression Mode (FFmpeg) is default if output extension is common
+        writer = WriteGear(output=record_path)
 
-    face_cascade = None
-    if mode == 'face':
-        cascade_path = os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml')
-        face_cascade = cv2.CascadeClassifier(cascade_path)
+    # 3. Network Streaming (NetGear)
+    server = None
+    if stream_address:
+        # Splitting address for NetGear (e.g. "127.0.0.1:5555")
+        try:
+            addr, port = stream_address.split(':')
+            server = NetGear(address=addr, port=port, protocol="tcp", pattern=0)
+        except ValueError:
+            print("Invalid stream address format. Use IP:PORT")
 
+    # Initialization
+    back_sub = cv2.createBackgroundSubtractorMOG2() if mode in ['motion', 'rembg'] else None
+    face_cascade = cv2.CascadeClassifier(os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml')) if mode == 'face' else None
+    
     recognizer = None
     if mode == 'recognize':
         recognizer = FaceRecognizer()
-        if os.path.exists('training_data'):
-            recognizer.train('training_data')
-        else:
-            print("Warning: No 'training_data' directory found.")
+        if os.path.exists('training_data'): recognizer.train('training_data')
 
-    print(f"Running in {mode} mode. Press 'q' to quit.")
+    if mode == 'chroma':
+        replacement_bg = np.zeros((480, 640, 3), np.uint8)
+        replacement_bg[:] = (255, 0, 0)
+        lower_green, upper_green = np.array([35, 100, 100]), np.array([85, 255, 255])
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    print(f"Running {mode} (Stabilize={stabilize}, Record={record_path is not None}, Net={stream_address is not None})")
 
-        processed = frame
-        if mode == 'edge':
-            processed = detect_edges(frame)
-        elif mode == 'motion':
-            processed = detect_motion(frame, back_sub)
-        elif mode == 'face':
-            processed = detect_faces(frame, face_cascade)
-        elif mode == 'recognize':
-            processed = recognizer.recognize(frame)
-        elif mode == 'ocr':
-            processed = detect_text_areas(frame)
-        elif mode == 'rembg':
-            processed, _ = remove_background_mog2(frame, back_sub)
-        elif mode == 'chroma':
-            processed = chroma_key(frame, lower_green, upper_green, replacement_bg)
+    try:
+        while True:
+            frame = stream.read()
+            if frame is None: break
 
-        cv2.imshow('FFTrix Vision', processed)
+            processed = frame.copy()
+            if mode == 'edge': processed = detect_edges(frame)
+            elif mode == 'motion': processed = detect_motion(frame, back_sub)
+            elif mode == 'face': processed = detect_faces(processed, face_cascade)
+            elif mode == 'recognize': processed = recognizer.recognize(processed)
+            elif mode == 'ocr': processed = perform_ocr(processed)
+            elif mode == 'rembg': processed, _ = remove_background_mog2(frame, back_sub)
+            elif mode == 'chroma': processed = chroma_key(frame, lower_green, upper_green, replacement_bg)
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+            # Record if enabled
+            if writer: writer.write(processed)
+            
+            # Send over network if enabled
+            if server: server.send(processed)
 
-    cap.release()
-    cv2.destroyAllWindows()
+            cv2.imshow('FFTrix Vision (VidGear)', processed)
+            if cv2.waitKey(1) & 0xFF == ord('q'): break
+    finally:
+        # Proper VidGear cleanup
+        stream.stop()
+        if writer: writer.close()
+        if server: server.close()
+        cv2.destroyAllWindows()

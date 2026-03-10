@@ -1,6 +1,6 @@
 [project]
 name = "fftrix"
-version = "0.1.1"
+version = "0.2.0"
 description = "A tool for processing video files using opencv numpy matplotlib vidgear pyffmpeg moviepy and vidgear."
 readme = "README.md"
 authors = [
