@@ -11,3 +11,6 @@ wheels/
 
 # Swarm
 swarm-config.yaml
+
+# Recordings
+recordings/
