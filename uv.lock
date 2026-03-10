@@ -298,7 +298,7 @@ wheels = [
 
 [[package]]
 name = "fftrix"
-version = "0.3.0"
+version = "0.3.6"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

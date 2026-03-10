@@ -4,8 +4,8 @@ from .vision import run_vision_loop
 from .dashboard import run_dashboard
 
 @click.command()
-@click.option('--ui', is_flag=True, default=True,
-              help='Launch the streaming dashboard (default).')
+@click.option('--ui/--no-ui', is_flag=True, default=True,
+              help='Launch the streaming dashboard (default: True).')
 @click.option('--cli', is_flag=True, default=False,
               help='Force command-line mode.')
 @click.option('--mode', default='edge', 
@@ -23,7 +23,7 @@ def main(ui, cli, mode, source, record, stream_to, stabilize):
     """FFTrix Video Processing Suite (VidGear & NiceGUI Powered)"""
     
     # If --cli is set, or --ui is explicitly false, run CLI mode
-    if cli:
+    if cli or not ui:
         processed_source = int(source) if source.isdigit() else source
         try:
             run_vision_loop(
