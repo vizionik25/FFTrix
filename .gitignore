@@ -14,3 +14,6 @@ swarm-config.yaml
 
 # Recordings
 recordings/
+
+# Database
+fftrix_system.db
