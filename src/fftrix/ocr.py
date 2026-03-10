@@ -1,43 +1,48 @@
 import cv2
 import numpy as np
+import pytesseract
 
-def detect_text_areas(frame):
-    """Detect areas likely containing text using morphological operations."""
+def perform_ocr(frame):
+    """
+    Perform character recognition on a frame.
+    1. Pre-processes the frame for better OCR accuracy.
+    2. Uses pytesseract to extract text.
+    3. Draws bounding boxes and text overlays.
+    """
+    # Convert to grayscale
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     
-    # Increase contrast
-    kernel = np.ones((5, 5), np.uint8)
-    gray = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
+    # Threshold to get black text on white background (or vice versa)
+    # Using adaptive thresholding for varying lighting conditions
+    processed = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+    )
     
-    # Edge detection
-    grad = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=-1)
-    grad = np.absolute(grad)
-    (min_val, max_val) = (np.min(grad), np.max(grad))
-    if max_val > 0:
-        grad = (255 * (grad - min_val) / (max_val - min_val)).astype("uint8")
-    else:
-        grad = grad.astype("uint8")
-    
-    # Blur and threshold
-    grad = cv2.GaussianBlur(grad, (9, 9), 0)
-    _, thresh = cv2.threshold(grad, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-    
-    # Morphological closing to connect text regions
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 7))
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-    
-    # Find contours
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        if w > 10 and h > 10:
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
-            cv2.putText(frame, "Text Region", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+    # OCR with pytesseract
+    # config='--psm 6' assumes a single uniform block of text
+    try:
+        # Get OCR data including bounding boxes
+        data = pytesseract.image_to_data(processed, output_type=pytesseract.Output.DICT)
+        
+        n_boxes = len(data['text'])
+        for i in range(n_boxes):
+            # Only process if confidence is > 60 and text is not empty
+            if int(data['conf'][i]) > 60:
+                text = data['text'][i].strip()
+                if text:
+                    (x, y, w, h) = (data['left'][i], data['top'][i], data['width'][i], data['height'][i])
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    cv2.putText(frame, text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    except Exception as e:
+        print(f"OCR Error: {e}")
+        cv2.putText(frame, "OCR Error: Ensure Tesseract is installed on your OS", (10, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
     return frame
 
-# For true OCR, integration with a model like Tesseract is required.
-# Example usage:
-# import pytesseract
-# text = pytesseract.image_to_string(roi)
+def detect_text_areas(frame):
+    """
+    Legacy method renamed for backward compatibility.
+    Now calls the improved perform_ocr.
+    """
+    return perform_ocr(frame)
