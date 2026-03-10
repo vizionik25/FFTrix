@@ -1,6 +1,6 @@
 [project]
 name = "fftrix"
-version = "0.4.0"
+version = "0.5.0"
 description = "A tool for processing video files using opencv numpy matplotlib vidgear pyffmpeg moviepy and vidgear."
 readme = "README.md"
 authors = [
@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.scripts]
-fftrix = "fftrix:main"
+fftrix = "fftrix.__main__:cli"
 
 [build-system]
 requires = ["uv_build>=0.10.7,<0.11.0"]

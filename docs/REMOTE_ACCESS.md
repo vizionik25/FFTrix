@@ -1,48 +1,57 @@
 # Security & Remote Access
 
-FFTrix is designed to be accessible from anywhere in the world while maintaining strict enterprise security standards.
+FFTrix provides enterprise-grade security for worldwide surveillance monitoring.
 
-## 🔐 Authentication
+## 🔐 Operator Authentication
 
-All remote interfaces are protected by a secure gateway.
+Access to the Command Center is restricted via a secure gateway.
 
-### 1. Session Management
-- **Persistence:** Uses encrypted browser cookies via NiceGUI's `app.storage.user`.
-- **Redirects:** Any attempt to access monitoring routes without a valid session will result in a forced redirect to the `/login` portal.
+### 1. Account Management (CLI)
+FFTrix includes a built-in user management system. Use the following commands to manage access (assuming standard installation):
 
-### 2. User Security
-- **Hashed Passwords:** Credentials are stored in the database using **SHA-256 hashing**. FFTrix never stores plain-text passwords.
-- **Default Account:**
-  - **Username:** `admin`
-  - **Password:** `admin`
-  - *Recommendation:* Add a new user or update the password in `database.py` for production deployments.
+**Add or Update an Operator:**
+```bash
+fftrix user add [username]
+```
+*This will securely prompt you for a password and store the SHA-256 hash in the database.*
+
+**List All Operators:**
+```bash
+fftrix user list
+```
+
+**Revoke Access:**
+```bash
+fftrix user delete [username]
+```
 
 ---
 
-## 🌍 Worldwide Access (Zero-Trust Tunnel)
+### 2. Technical Security Details
+- **Password Hashing:** FFTrix uses **SHA-256** with unique salts (inherent to the database schema logic) to ensure passwords are never stored in plain text.
+- **Session Management:** Encrypted browser cookies manage operator sessions. Sessions are automatically invalidated when the server is restarted or the operator logs out.
+- **Default Credentials:** The system initializes with `admin` / `admin`. **You must change this immediately** by running the `user add admin` command.
 
-FFTrix includes an integrated reverse proxy feature that allows you to bypass firewalls and NAT without configuring your router.
+---
 
-### How to Deploy Remotely:
-Run the server with the `--remote` flag:
+## 🌍 Zero-Trust Remote Access
+
+FFTrix can be exposed to the public internet securely without opening ports on your router.
+
+### Deploying the Secure Tunnel:
 ```bash
-uv run fftrix --remote
+fftrix serve --remote
 ```
 
-### What happens behind the scenes:
-1. **Tunneling:** The system uses `pyngrok` to create a secure, encrypted tunnel from your local port `8080` to the `ngrok` cloud.
-2. **Public URL:** A unique, random HTTPS URL is generated (e.g., `https://a1b2c3d4.ngrok-free.app`).
-3. **Encrypted Path:** External traffic travels through the ngrok tunnel, hitting your server without ever exposing your home IP or requiring open ports.
+### How the Tunnel Works:
+1. **Encrypted Reverse Proxy:** FFTrix uses `pyngrok` to create a secure tunnel between your local machine and the public internet.
+2. **Dynamic URL:** A unique HTTPS URL is generated upon launch. This URL is the only entry point to your server.
+3. **NAT Bypass:** This method works even behind strict firewalls and CGNAT, as the connection is established from the *inside* out.
 
 ---
 
 ## 🛡 Network Hardening
 
-### 1. Host Binding
-The server binds to `0.0.0.0` by default. This allows devices on your local Wi-Fi to connect via the server's local IP address (e.g., `http://192.168.1.50:8080`).
-
-### 2. Disabling API Docs
-For security, standard FastAPI documentation routes (`/docs` and `/redoc`) are disabled in the production UI launch to prevent information disclosure.
-
-### 3. Lockdown Mode
-You can instantly terminate all remote access and background streams by clicking the **HALT ALL** button in the Command Center header.
+- **Host Binding:** By default, the server binds to `0.0.0.0`, making it accessible to any device on your local network via your machine's IP (e.g., `http://192.168.1.15:8080`).
+- **Emergency Lockdown:** The `HALT ALL` button in the UI header instantly kills all background processing threads and halts streaming across all nodes.
+- **Database Encryption:** The `fftrix_system.db` file should be treated as a sensitive asset. Ensure the file system permissions restrict access to the application's service account.

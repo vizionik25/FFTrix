@@ -28,30 +28,42 @@ FFTrix is a professional-grade, multi-threaded NVR (Network Video Recorder), AI 
 - Tesseract OCR (Optional, for OCR mode).
 
 ### Installation
-```bash
-# Clone the repository
-git clone https://github.com/your-username/fftrix.git
-cd fftrix
 
-# Install dependencies using uv
-uv sync
+**Using uv (Recommended):**
+```bash
+uv add fftrix
+```
+
+**Using pip:**
+```bash
+pip install fftrix
 ```
 
 ### Running the Server
 ```bash
 # Launch the Dashboard (Local Network)
-uv run fftrix
+fftrix serve
 
 # Launch with Secure Remote Tunnel (Public Internet)
-uv run fftrix --remote
+fftrix serve --remote
 
 # Force CLI Mode (No UI)
-uv run fftrix --cli --mode motion --source 0
+fftrix serve --cli-mode --mode motion --source 0
 ```
 
 **Default Credentials:** 
 - **Username:** `admin`
 - **Password:** `admin`
+- *Change these immediately using:* `fftrix user add admin`
+
+## 🛠 Development
+
+To install for development:
+```bash
+git clone https://github.com/your-username/fftrix.git
+cd fftrix
+uv sync
+```
 
 ## 📖 Documentation
 
