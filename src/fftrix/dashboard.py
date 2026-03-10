@@ -3,272 +3,258 @@ import numpy as np
 import base64
 import os
 import time
+import json
 from nicegui import ui, app
-from .vision import detect_edges, detect_motion, detect_faces
-from .ocr import perform_ocr
-from .segmentation import remove_background_mog2, chroma_key
-from .face_recognition import FaceRecognizer
-from vidgear.gears import VideoGear, WriteGear
+from fastapi.responses import RedirectResponse
+from .database import Database
+from .engine import CameraNode
+from .analytics import AnalyticsPipeline
 
 class Dashboard:
     def __init__(self):
-        # Viewport Settings (Locked Size)
-        self.VIEWPORT_WIDTH = 1280
-        self.VIEWPORT_HEIGHT = 720
-        
-        # Stream State
-        self.stream = None
-        self.writer = None
-        self.is_running = False
-        self.is_recording = False
-        self.mode = 'edge'
-        self.source = '0'
-        
-        # App Settings
-        self.theme_dark = True
-        self.show_fps = True
-        self.auto_start = False
+        self.db = Database()
+        self.analytics = AnalyticsPipeline()
+        self.cameras = {} 
         self.recording_dir = os.path.join(os.getcwd(), 'recordings')
+        self.grid_columns = 2
         
-        # Device & Encoding Settings
-        self.stabilize = False
-        self.rtsp_transport = 'tcp'
-        self.threaded_queue = True
-        self.reorder_queue = True
-        self.output_filename = 'capture.mp4'
-        self.ffmpeg_custom_flags = "-vcodec libx264 -crf 23 -preset fast"
+        # UI State
+        self.selected_cam_id = None
+        self.is_drawing_zone = False
+        self.temp_zone_start = None
         
-        # Vision Tools
-        self.back_sub = None
-        self.face_cascade = None
-        self.recognizer = None
+        # Serve recordings statically if needed
+        app.add_static_files('/recordings', self.recording_dir)
         
-        # UI References
-        self.image_display = None
-        self.status_label = None
-        self.fps_label = None
-        self.rec_status_label = None
-        self.last_frame_time = 0
+        # Load existing configuration from Database
+        for c in self.db.get_cameras():
+            self._init_camera(c['id'], c['name'], c['url'], c['mode'], 
+                              c['zones'], c['record_247'], c['watermark'], start=False)
 
-    def parse_ffmpeg_params(self):
-        """Convert string flags to a VidGear-compatible dictionary."""
-        params = {}
-        parts = self.ffmpeg_custom_flags.split()
-        for i in range(0, len(parts)-1, 2):
-            if parts[i].startswith('-'):
-                params[parts[i]] = parts[i+1]
-        return params
+    def _init_camera(self, cam_id, name, url, mode, zones, record_247, watermark, start=True):
+        """Standard camera node initialization."""
+        self.analytics.set_config(cam_id, mode, zones, watermark)
+        node = CameraNode(cam_id, url, name, self.analytics, self.db, record_247=record_247)
+        self.cameras[cam_id] = node
+        if start: node.start()
 
-    def initialize_vision_tools(self):
-        """Pre-load necessary CV models."""
-        self.back_sub = cv2.createBackgroundSubtractorMOG2() if self.mode in ['motion', 'rembg'] else None
-        self.face_cascade = cv2.CascadeClassifier(os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml')) if self.mode == 'face' else None
-        
-        if self.mode == 'recognize':
-            self.recognizer = FaceRecognizer()
-            if os.path.exists('training_data'):
-                self.recognizer.train('training_data')
-
-    def start_stream(self):
-        """Initialize the VidGear stream."""
-        if self.stream: self.stop_all()
-            
-        options = {
-            "stabilize": self.stabilize,
-            "THREADED_QUEUE_MODE": self.threaded_queue,
-            "REORDER_QUEUE_MODE": self.reorder_queue
-        }
-        
-        if isinstance(self.source, str) and self.source.startswith(('rtsp', 'http')):
-            options["rtsp_transport"] = self.rtsp_transport
-        
-        processed_source = int(self.source) if self.source.isdigit() else self.source
-        
-        try:
-            self.stream = VideoGear(source=processed_source, **options).start()
-            self.initialize_vision_tools()
-            self.is_running = True
-            ui.notify(f"Stream Active: {self.mode}", type='info')
-            if self.status_label:
-                self.status_label.set_text(f"LIVE: {self.mode}")
-                self.status_label.classes('text-green-400', remove='text-red-500')
-        except Exception as e:
-            ui.notify(f"Connection Failed: {e}", type='negative')
-
-    def toggle_recording(self):
-        """Start or stop the WriteGear recording process."""
-        if not self.is_running:
-            ui.notify("Start stream before recording", type='warning')
-            return
-
-        if not self.is_recording:
-            try:
-                if not os.path.exists(self.recording_dir):
-                    os.makedirs(self.recording_dir)
-                
-                full_path = os.path.join(self.recording_dir, self.output_filename)
-                params = self.parse_ffmpeg_params()
-                
-                # Initialize WriteGear with custom parameters
-                self.writer = WriteGear(output=full_path, **params)
-                self.is_recording = True
-                ui.notify(f"Recording to {self.output_filename}", type='positive')
-                if self.rec_status_label:
-                    self.rec_status_label.set_text("RECORDING")
-                    self.rec_status_label.classes('text-red-500 animate-pulse')
-            except Exception as e:
-                ui.notify(f"Recording Error: {e}", type='negative')
+    # --- AUTHENTICATION LOGIC ---
+    def handle_login(self, username, password):
+        if self.db.verify_user(username, password):
+            app.storage.user.update({'authenticated': True, 'username': username})
+            ui.navigate.to('/')
         else:
-            self.stop_recording()
+            ui.notify('Invalid credentials', type='negative')
 
-    def stop_recording(self):
-        """Stop writing to file."""
-        self.is_recording = False
-        if self.writer:
-            self.writer.close()
-            self.writer = None
-        if self.rec_status_label:
-            self.rec_status_label.set_text("IDLE")
-            self.rec_status_label.classes('text-slate-400', remove='text-red-500 animate-pulse')
-        ui.notify("Recording saved", type='info')
+    def handle_logout(self):
+        app.storage.user.update({'authenticated': False})
+        ui.navigate.to('/login')
 
-    def stop_all(self):
-        """Full cleanup of stream and recording."""
-        self.stop_recording()
-        self.is_running = False
-        if self.stream:
-            self.stream.stop()
-            self.stream = None
-        if self.status_label:
-            self.status_label.set_text("OFFLINE")
-            self.status_label.classes('text-red-500', remove='text-green-400')
-        if self.image_display:
-            self.image_display.set_source('https://via.placeholder.com/1280x720?text=SIGNAL+LOST')
+    # --- ZONING & WATERMARKS ---
+    def handle_viewport_click(self, e):
+        """Zoning logic for security boundaries."""
+        if not self.selected_cam_id or not self.is_drawing_zone: return
+        x, y = int(e.image_x), int(e.image_y)
+        if self.temp_zone_start is None:
+            self.temp_zone_start = (x, y)
+            ui.notify(f"Point A set at {x},{y}")
+        else:
+            x1, y1 = self.temp_zone_start
+            new_zone = [min(x, x1), min(y, y1), abs(x - x1), abs(y - y1)]
+            current_zones = self.analytics.zones.get(self.selected_cam_id, [])
+            current_zones.append(new_zone)
+            self.analytics.zones[self.selected_cam_id] = current_zones
+            self.db.update_camera_config(self.selected_cam_id, zones=current_zones)
+            self.temp_zone_start = None
+            self.is_drawing_zone = False
+            ui.notify("Security Zone Deployed", type='positive')
 
-    async def update_frame(self):
-        """Process and fit frame into the static viewport, and record if active."""
-        if not self.is_running or self.stream is None:
+    def update_watermark(self, cam_id, key, value):
+        """Real-time watermark configuration sync."""
+        config = self.analytics.watermarker.configs.get(cam_id, {
+            'text': '', 'image_path': '', 'mode': 'static', 'x': 50, 'y': 50, 'transparency': 0.5
+        })
+        config[key] = value
+        self.analytics.watermarker.set_config(cam_id, config)
+        self.db.update_camera_config(cam_id, watermark=config)
+
+    def add_camera_ui(self, name, url, mode):
+        if not name or not url: return
+        cam_id = f"C{len(self.cameras)+1:02d}"
+        self.db.add_camera(cam_id, name, url, mode)
+        self._init_camera(cam_id, name, url, mode, [], False, {}, start=True)
+        ui.notify(f"Node {name} provisioned", type='positive')
+        self.build_grid.refresh()
+
+    def delete_camera(self, cam_id):
+        if cam_id in self.cameras:
+            self.cameras[cam_id].stop()
+            del self.cameras[cam_id]
+            self.db.remove_camera(cam_id)
+            ui.notify(f"Camera {cam_id} decommissioned", type='info')
+            self.selected_cam_id = None
+            self.build_grid.refresh()
+
+    @ui.refreshable
+    def build_grid(self):
+        """Fixed-size Surveillance Matrix (1280x720 locked)."""
+        if not self.cameras:
+            with ui.column().classes('w-full h-full items-center justify-center'):
+                ui.icon('security', size='100px').classes('text-slate-700')
+                ui.label("ENTERPRISE CORE OFFLINE").classes('text-2xl text-slate-600 font-black')
             return
 
-        frame = self.stream.read()
-        if frame is None: return
+        with ui.grid(columns=self.grid_columns).classes('w-full h-full gap-1 p-1 bg-black'):
+            for cam_id, node in self.cameras.items():
+                border = 'border-2 border-blue-500' if cam_id == self.selected_cam_id else 'border border-slate-800'
+                with ui.card().classes(f'p-0 bg-slate-900 relative rounded-none {border} overflow-hidden cursor-pointer').on('click', lambda c=cam_id: setattr(self, 'selected_cam_id', c) or self.build_sidebar.refresh()):
+                    img = ui.interactive_image().style('width: 100%; height: 100%; object-fit: contain;')
+                    img.on('click', self.handle_viewport_click)
+                    
+                    # Mini-HUD
+                    with ui.row().classes('absolute bottom-0 left-0 w-full bg-black/60 p-1 justify-between items-center'):
+                        ui.label(node.name).classes('text-[10px] font-bold truncate ml-1 text-slate-300')
+                        with ui.row().classes('gap-2 mr-1'):
+                            if node.record_247: ui.icon('fiber_smart_record', size='14px').classes('text-red-500')
+                            ui.button(icon='edit_location', on_click=lambda c=cam_id: setattr(self, 'selected_cam_id', c) or setattr(self, 'is_drawing_zone', True)).props('flat dense size=xs color=cyan')
+                    
+                    node.ui_image = img
 
-        # FPS Tracking
-        curr_time = time.time()
-        fps = 1 / (curr_time - self.last_frame_time) if self.last_frame_time > 0 else 0
-        self.last_frame_time = curr_time
-        if self.fps_label and self.show_fps:
-            self.fps_label.set_text(f"FPS: {fps:.1f}")
+    @ui.refreshable
+    def build_timeline(self):
+        """Flagged Trigger Timeline."""
+        flags = self.db.get_events(20, flags_only=True)
+        if not flags:
+            ui.label("System Secure. No Incidents.").classes('text-slate-500 text-xs italic')
+        for f in flags:
+            with ui.row().classes('w-full items-center bg-red-950/20 p-2 rounded mb-2 border-l-4 border-red-600'):
+                ui.icon('flag', size='xs').classes('text-red-500')
+                with ui.column().classes('gap-0'):
+                    ui.label(f"{f['source']} @ {f['timestamp']}").classes('text-[10px] font-black text-red-200')
+                    ui.label(f['details']).classes('text-[9px] text-slate-400')
 
-        # Core Vision Logic
-        processed = frame.copy()
-        try:
-            if self.mode == 'edge': processed = detect_edges(frame)
-            elif self.mode == 'motion': processed = detect_motion(frame, self.back_sub)
-            elif self.mode == 'face': processed = detect_faces(processed, self.face_cascade)
-            elif self.mode == 'recognize' and self.recognizer: processed = self.recognizer.recognize(processed)
-            elif self.mode == 'ocr': processed = perform_ocr(processed)
-            elif self.mode == 'rembg': processed, _ = remove_background_mog2(frame, self.back_sub)
-        except Exception as e:
-            print(f"Loop Error: {e}")
-
-        # Recording
-        if self.is_recording and self.writer:
-            self.writer.write(processed)
-
-        # UI Scaling & Update
-        _, buffer = cv2.imencode('.jpg', processed)
-        encoded = base64.b64encode(buffer).decode('utf-8')
-        if self.image_display:
-            self.image_display.set_source(f'data:image/jpeg;base64,{encoded}')
-
-    def build_ui(self):
-        """Advanced UI with locked viewport and encoding settings."""
-        ui.query('body').style('background-color: #0f172a;')
+    async def update_ui_loop(self):
+        """High-speed MJPEG streaming loop."""
+        for cam_id, node in self.cameras.items():
+            if hasattr(node, 'ui_image') and getattr(node, 'processed_frame', None) is not None:
+                _, buffer = cv2.imencode('.jpg', node.processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                encoded = base64.b64encode(buffer).decode('utf-8')
+                node.ui_image.set_source(f'data:image/jpeg;base64,{encoded}')
         
-        with ui.header().classes('bg-slate-800 p-4 justify-between items-center shadow-lg'):
-            with ui.row().classes('items-center'):
-                ui.icon('videocam', size='md').classes('text-blue-400')
-                ui.label('FFTrix Advanced Suite').classes('text-2xl font-black tracking-tight')
+        if int(time.time() * 10) % 30 == 0:
+            self.build_timeline.refresh()
+
+    @ui.refreshable
+    def build_sidebar(self):
+        with ui.column().classes('w-80 bg-slate-950 h-full border-r border-slate-800 p-4 gap-4 overflow-y-auto flex-shrink-0'):
+            with ui.expansion('PROVISIONING', icon='add_circle').classes('w-full bg-slate-900/50 rounded'):
+                name = ui.input('Name').props('dark dense')
+                url = ui.input('URL').props('dark dense')
+                mode = ui.select({'none':'Raw', 'motion':'Motion', 'face':'Faces', 'object':'AI Personnel'}, value='none').props('dark dense')
+                ui.button('DEPLOY NODE', on_click=lambda: self.add_camera_ui(name.value, url.value, mode.value)).classes('w-full mt-2 bg-blue-900')
+
+            ui.separator().classes('border-slate-800')
+
+            if self.selected_cam_id and self.selected_cam_id in self.cameras:
+                cam = self.cameras[self.selected_cam_id]
+                wm = self.analytics.watermarker.configs.get(self.selected_cam_id, {})
+                
+                with ui.column().classes('w-full gap-2 p-3 bg-slate-900 rounded border border-blue-900/50 shadow-inner'):
+                    ui.label(f'TARGET: {cam.name}').classes('text-xs font-black text-blue-400 tracking-widest')
+                    
+                    ui.switch('24/7 Continuous DVR', value=cam.record_247, on_change=lambda e: self.db.update_camera_config(self.selected_cam_id, record_247=e.value)).props('dark size=sm')
+                    
+                    with ui.row().classes('w-full gap-2'):
+                        ui.button('DRAW ZONE', icon='crop_free', on_click=lambda: setattr(self, 'is_drawing_zone', True)).props('outline size=sm color=cyan').classes('flex-grow')
+                        ui.button('CLEAR ZONES', icon='layers_clear', on_click=lambda: self.db.update_camera_config(self.selected_cam_id, zones=[]) or self.analytics.zones.__setitem__(self.selected_cam_id, [])).props('outline size=sm color=red')
+                    
+                    ui.separator().classes('my-2 border-slate-800')
+                    
+                    ui.label('WATERMARK ENGINE').classes('text-[10px] font-bold text-slate-500 tracking-widest')
+                    ui.input('Branding Text', value=wm.get('text',''), on_change=lambda e: self.update_watermark(self.selected_cam_id, 'text', e.value)).props('dark dense filled').classes('w-full')
+                    ui.input('Logo Path (PNG)', value=wm.get('image_path',''), on_change=lambda e: self.update_watermark(self.selected_cam_id, 'image_path', e.value)).props('dark dense filled').classes('w-full')
+                    
+                    with ui.row().classes('w-full items-center justify-between'):
+                        ui.label('Opacity').classes('text-[10px] text-slate-400')
+                        ui.slider(min=0.1, max=1.0, step=0.1, value=wm.get('transparency', 0.5), on_change=lambda e: self.update_watermark(self.selected_cam_id, 'transparency', e.value)).props('dark dense').classes('w-32')
+                    
+                    ui.select({'static':'Static (Manual)', 'floating':'Floating (Bouncing)'}, label="Behavior", value=wm.get('mode','static'), 
+                              on_change=lambda e: self.update_watermark(self.selected_cam_id, 'mode', e.value)).props('dark dense outlined').classes('w-full mt-2')
+                    
+                    ui.button('DELETE NODE', icon='delete', on_click=lambda: self.delete_camera(self.selected_cam_id)).props('flat size=sm color=negative').classes('w-full mt-4')
+
+            ui.separator().classes('border-slate-800')
+            ui.label('MATRIX CONFIG').classes('text-[10px] font-bold text-slate-500 tracking-widest')
+            ui.slider(min=1, max=4, value=2, on_change=lambda e: setattr(self, 'grid_columns', e.value) or self.build_grid.refresh()).props('dark color=blue markers snap')
+            with ui.row().classes('w-full justify-between px-2 text-[10px] text-slate-500 font-mono'):
+                ui.label('1x1')
+                ui.label('4x4')
+
+    @ui.page('/login')
+    def login_page(self):
+        if app.storage.user.get('authenticated', False):
+            return RedirectResponse('/')
             
-            with ui.row().classes('items-center gap-6'):
-                self.fps_label = ui.label('FPS: 0.0').classes('font-mono text-blue-300')
-                self.rec_status_label = ui.label('IDLE').classes('font-bold text-slate-400')
-                self.status_label = ui.label('OFFLINE').classes('font-bold text-red-500')
-                ui.button(icon='power_settings_new', on_click=self.stop_all).props('flat round').classes('text-white')
-
-        with ui.tabs().classes('w-full bg-slate-800 text-white shadow-md') as tabs:
-            view_tab = ui.tab('Stream View', icon='visibility')
-            app_tab = ui.tab('App Settings', icon='tune')
-            device_tab = ui.tab('Hardware & Encoding', icon='memory')
-
-        with ui.tab_panels(tabs, value=view_tab).classes('w-full bg-transparent p-0'):
+        ui.query('body').style('background-color: #020617; display: flex; justify-content: center; align-items: center; height: 100vh;')
+        
+        with ui.card().classes('w-96 p-8 bg-slate-900 border border-slate-800 shadow-2xl items-center rounded-xl'):
+            ui.icon('security', size='xl').classes('text-blue-600 mb-2')
+            ui.label('FFTRIX SECURE GATEWAY').classes('text-xl font-black tracking-widest text-slate-100 mb-8 text-center')
             
-            # --- LIVE MONITOR PANEL ---
-            with ui.tab_panel(view_tab).classes('p-4'):
-                with ui.row().classes('w-full justify-center'):
-                    # Static Locked Viewport
-                    with ui.card().style(f'width: {self.VIEWPORT_WIDTH}px; height: {self.VIEWPORT_HEIGHT}px; background-color: black; padding: 0; overflow: hidden;'):
-                        self.image_display = ui.interactive_image().style('width: 100%; height: 100%; object-fit: contain;')
-                        self.image_display.set_source('https://via.placeholder.com/1280x720?text=SYSTEM+READY')
+            user = ui.input('Operator ID').props('dark filled').classes('w-full mb-4')
+            pw = ui.input('Passcode', password=True).props('dark filled').classes('w-full mb-8').on('keydown.enter', lambda: self.handle_login(user.value, pw.value))
+            
+            ui.button('AUTHORIZE', on_click=lambda: self.handle_login(user.value, pw.value)).classes('w-full bg-blue-700 hover:bg-blue-600 font-bold py-3 text-lg')
+            ui.label('RESTRICTED ACCESS').classes('text-[10px] text-red-900/50 mt-8 tracking-[0.4em] font-black')
 
-                # Quick Dashboard Controls
-                with ui.row().classes('w-full justify-center mt-4 gap-4'):
-                    with ui.card().classes('bg-slate-800 p-3 px-8 flex-row items-center gap-6'):
-                        ui.input(label='Source', value=self.source, on_change=lambda e: setattr(self, 'source', e.value)).props('dark dense outlined')
-                        ui.select({
-                            'edge': 'Edge Detect', 'motion': 'Motion', 'face': 'Faces', 
-                            'recognize': 'Recognition', 'ocr': 'True OCR', 'rembg': 'Isolation'
-                        }, label='Mode', value=self.mode, on_change=lambda e: setattr(self, 'mode', e.value)).props('dark dense outlined').classes('w-40')
-                        
-                        ui.button('START STREAM', on_click=self.start_stream).classes('bg-blue-700 font-bold px-6')
-                        ui.button('RECORD', on_click=self.toggle_recording).bind_classes({
-                            'bg-red-700': 'is_recording',
-                            'bg-slate-700': 'not is_recording'
-                        }, target=self).classes('font-bold px-6')
-
-            # --- APP SETTINGS PANEL ---
-            with ui.tab_panel(app_tab).classes('p-8'):
-                with ui.column().classes('max-w-2xl mx-auto bg-slate-800 p-8 rounded-xl shadow-2xl'):
-                    ui.label('Application Preferences').classes('text-2xl font-bold mb-4 text-blue-400')
-                    ui.switch('Show Live FPS Counter', value=self.show_fps, on_change=lambda e: setattr(self, 'show_fps', e.value)).props('dark')
-                    ui.switch('Launch stream on application start', value=self.auto_start, on_change=lambda e: setattr(self, 'auto_start', e.value)).props('dark')
-                    
-                    ui.separator().classes('my-4')
-                    ui.label('Recording Storage Path').classes('text-sm text-slate-400')
-                    ui.input(value=self.recording_dir, on_change=lambda e: setattr(self, 'recording_dir', e.value)).props('dark filled dense')
-                    
-                    ui.label('Default Output Filename').classes('text-sm text-slate-400 mt-4')
-                    ui.input(value=self.output_filename, on_change=lambda e: setattr(self, 'output_filename', e.value)).props('dark filled dense')
-
-            # --- DEVICE & ENCODING SETTINGS PANEL ---
-            with ui.tab_panel(device_tab).classes('p-8'):
-                with ui.column().classes('max-w-2xl mx-auto bg-slate-800 p-8 rounded-xl shadow-2xl'):
-                    ui.label('Stream Hardware Optimization').classes('text-2xl font-bold mb-4 text-blue-400')
-                    with ui.row().classes('gap-8'):
-                        ui.switch('Video Stabilization', value=self.stabilize, on_change=lambda e: setattr(self, 'stabilize', e.value)).props('dark')
-                        ui.switch('Low Latency (Threaded)', value=self.threaded_queue, on_change=lambda e: setattr(self, 'threaded_queue', e.value)).props('dark')
-                    
-                    ui.label('RTSP Network Transport').classes('mt-4 text-sm text-slate-400')
-                    ui.radio(['tcp', 'udp'], value=self.rtsp_transport, on_change=lambda e: setattr(self, 'rtsp_transport', e.value)).props('dark inline')
-                    
-                    ui.separator().classes('my-6')
-                    ui.label('Custom FFmpeg Parameters (Advanced Encoding)').classes('text-xl font-bold mb-2 text-red-400')
-                    ui.label('Directly passed to WriteGear. Ensure valid FFmpeg flag pairs.').classes('text-xs text-slate-500 mb-2')
-                    ui.textarea(value=self.ffmpeg_custom_flags, on_change=lambda e: setattr(self, 'ffmpeg_custom_flags', e.value)).props('dark filled').classes('w-full font-mono')
-                    
-                    ui.label('Encoding Buffer Delay').classes('text-sm text-slate-400 mt-4')
-                    ui.slider(min=1, max=100, value=30).props('dark')
-
-        # Async frame update loop
-        ui.timer(0.01, self.update_frame)
-
-def run_dashboard():
-    dashboard = Dashboard()
     @ui.page('/')
-    def main_page():
-        dashboard.build_ui()
-    ui.run(title="FFTrix Pro Monitor", port=8080, reload=False, show=False, dark=True)
+    def main_page(self):
+        if not app.storage.user.get('authenticated', False):
+            return RedirectResponse('/login')
+            
+        ui.query('body').style('background-color: #020617; color: #f8fafc; overflow: hidden; margin: 0; padding: 0;')
+        
+        with ui.header().classes('bg-slate-950 border-b border-slate-800 py-3 px-6 justify-between items-center shadow-2xl z-50'):
+            with ui.row().classes('items-center gap-4'):
+                ui.icon('camera_outdoor', size='md').classes('text-blue-500')
+                ui.label('FFTrix PRO').classes('text-xl font-black tracking-[0.2em]')
+                ui.label('ENTERPRISE EDITION').classes('text-[9px] bg-blue-900/30 text-blue-400 px-2 py-1 rounded font-bold tracking-widest ml-2')
+            
+            with ui.row().classes('gap-6 items-center'):
+                ui.button('ENGAGE ALL', on_click=lambda: [n.start() for n in self.cameras.values()]).props('outline size=sm color=green')
+                ui.button('HALT ALL', on_click=lambda: [n.stop() for n in self.cameras.values()]).props('outline size=sm color=red')
+                ui.separator().props('vertical dark').classes('h-6 mx-2')
+                ui.icon('account_circle', size='sm').classes('text-slate-500')
+                ui.label(f"{app.storage.user.get('username', 'OPERATOR').upper()}").classes('text-xs font-mono text-slate-300')
+                ui.button(icon='logout', on_click=self.handle_logout).props('flat size=sm color=slate-500 hover:text-white')
+
+        with ui.row().classes('w-full h-[calc(100vh-64px)] no-wrap'):
+            self.build_sidebar()
+            
+            with ui.column().classes('flex-grow bg-black overflow-hidden relative shadow-inner'):
+                self.build_grid()
+
+            with ui.column().classes('w-72 bg-slate-950 h-full border-l border-slate-800 p-4 overflow-y-auto flex-shrink-0'):
+                ui.label('INCIDENT TIMELINE').classes('text-[10px] font-black text-red-500 tracking-[0.3em] mb-4')
+                self.build_timeline()
+
+        ui.timer(0.05, self.update_ui_loop)
+
+def run_dashboard(remote=False):
+    if remote:
+        try:
+            from pyngrok import ngrok
+            public_url = ngrok.connect(8080)
+            print(f"\n{'='*70}")
+            print(f"🌍 SECURE REMOTE ACCESS DEPLOYED")
+            print(f"🔗 Public URL: {public_url.public_url}")
+            print(f"🔒 Gateway requires operator authentication.")
+            print(f"{'='*70}\n")
+        except Exception as e:
+            print(f"Failed to deploy secure tunnel: {e}")
+
+    dashboard = Dashboard()
+    ui.run(title="FFTrix Enterprise", port=8080, host='0.0.0.0', storage_secret='secure_surveillance_secret_key_2024', dark=True)
 
 if __name__ in {"__main__", "__mp_main__"}:
     run_dashboard()

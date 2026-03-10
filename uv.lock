@@ -298,7 +298,7 @@ wheels = [
 
 [[package]]
 name = "fftrix"
-version = "0.3.6"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -308,6 +308,7 @@ dependencies = [
     { name = "numpy" },
     { name = "opencv-contrib-python" },
     { name = "pyffmpeg" },
+    { name = "pyngrok" },
     { name = "pytesseract" },
     { name = "vidgear" },
 ]
@@ -321,6 +322,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.4.3" },
     { name = "opencv-contrib-python", specifier = ">=4.13.0.92" },
     { name = "pyffmpeg", specifier = ">=2.5.2.3.2" },
+    { name = "pyngrok", specifier = ">=7.5.1" },
     { name = "pytesseract", specifier = ">=0.3.13" },
     { name = "vidgear", specifier = ">=0.3.4" },
 ]
@@ -949,6 +951,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/b0/77/a5b8c569bf593b0140bde72ea885a803b82086995367bf2037de0159d924/pygments-2.19.2.tar.gz", hash = "sha256:636cb2477cec7f8952536970bc533bc43743542f70392ae026374600add5b887", size = 4968631, upload-time = "2025-06-21T13:39:12.283Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c7/21/705964c7812476f378728bdf590ca4b771ec72385c533964653c68e86bdc/pygments-2.19.2-py3-none-any.whl", hash = "sha256:86540386c03d588bb81d44bc3928634ff26449851e99741617ecb9037ee5ec0b", size = 1225217, upload-time = "2025-06-21T13:39:07.939Z" },
+]
+
+[[package]]
+name = "pyngrok"
+version = "7.5.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyyaml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9e/8b/a254d57f6d5ec8797daa57510abd8e82eb7f7992fc1c455677f28e805893/pyngrok-7.5.1.tar.gz", hash = "sha256:934ec8a899ace8ec61c39120a27a8212aeb40293cad2f4ffc8a3d1a4bb6a8d6c", size = 43307, upload-time = "2026-03-06T18:03:44.774Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e0/c3/c73d882109bb19804383c375b42bbbdcbf3838fc3305217d9ba1bb051cfa/pyngrok-7.5.1-py3-none-any.whl", hash = "sha256:88f1ffb0ccc8dbc7810a29136eb9db3abb46b62436da438e277dfc1e70cf76ae", size = 24801, upload-time = "2026-03-06T18:03:43.746Z" },
 ]
 
 [[package]]

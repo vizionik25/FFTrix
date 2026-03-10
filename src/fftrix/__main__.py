@@ -8,6 +8,8 @@ from .dashboard import run_dashboard
               help='Launch the streaming dashboard (default: True).')
 @click.option('--cli', is_flag=True, default=False,
               help='Force command-line mode.')
+@click.option('--remote', is_flag=True, default=False,
+              help='Expose the dashboard to the public internet securely via a reverse proxy tunnel.')
 @click.option('--mode', default='edge', 
               type=click.Choice(['edge', 'motion', 'face', 'recognize', 'ocr', 'rembg', 'chroma'], case_sensitive=False),
               help='Processing mode (CLI only).')
@@ -19,7 +21,7 @@ from .dashboard import run_dashboard
               help='Broadcasting address (CLI only).')
 @click.option('--stabilize', is_flag=True, default=False,
               help='Enable stabilization (CLI only).')
-def main(ui, cli, mode, source, record, stream_to, stabilize):
+def main(ui, cli, remote, mode, source, record, stream_to, stabilize):
     """FFTrix Video Processing Suite (VidGear & NiceGUI Powered)"""
     
     # If --cli is set, or --ui is explicitly false, run CLI mode
@@ -38,8 +40,8 @@ def main(ui, cli, mode, source, record, stream_to, stabilize):
             sys.exit(0)
     else:
         # Default: Launch the Dashboard
-        click.echo("Launching FFTrix Dashboard on http://localhost:8080")
-        run_dashboard()
+        click.echo("Launching FFTrix Dashboard...")
+        run_dashboard(remote=remote)
 
 if __name__ == "__main__":
     main()
