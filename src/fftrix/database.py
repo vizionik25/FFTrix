@@ -3,10 +3,21 @@ import time
 import os
 import json
 import hashlib
+from pathlib import Path
+
+# Centralized Home Path Configuration
+FFTRIX_HOME = Path.home() / ".fftrix"
+DB_PATH = FFTRIX_HOME / "system.db"
+RECORDINGS_DIR = FFTRIX_HOME / "recordings"
 
 class Database:
-    def __init__(self, db_path="fftrix_system.db"):
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+    def __init__(self, db_path=None):
+        # Ensure FFTRIX_HOME exists on first run
+        FFTRIX_HOME.mkdir(parents=True, exist_ok=True)
+        RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+        
+        target_db = db_path if db_path else str(DB_PATH)
+        self.conn = sqlite3.connect(target_db, check_same_thread=False)
         self.create_tables()
         self._init_default_user()
         

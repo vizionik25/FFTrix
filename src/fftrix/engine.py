@@ -4,6 +4,7 @@ from vidgear.gears import VideoGear, WriteGear
 import cv2
 import os
 import numpy as np
+from .database import RECORDINGS_DIR
 
 class CameraNode:
     def __init__(self, cam_id, source, name, analytics_pipeline, db, record_247=False):
@@ -17,7 +18,7 @@ class CameraNode:
         self.record_247 = record_247 # Continuous recording
         self.analytics = analytics_pipeline
         self.db = db
-        self.processed_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        self.processed_frame = np.zeros((480, 640, 3), np.uint8)
         self.thread = None
         self.fps = 0
         self.trigger_active = False
@@ -45,9 +46,9 @@ class CameraNode:
             self.db.log_event("ERROR", self.name, f"Startup failed: {e}")
 
     def _start_writer(self, prefix="rec"):
-        output_dir = os.path.join(os.getcwd(), 'recordings', self.id)
-        os.makedirs(output_dir, exist_ok=True)
-        filename = os.path.join(output_dir, f"{prefix}_{int(time.time())}.mp4")
+        output_dir = RECORDINGS_DIR / self.id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        filename = str(output_dir / f"{prefix}_{int(time.time())}.mp4")
         self.writer = WriteGear(output=filename, logging=False, **{"-vcodec": "libx264", "-crf": "28"})
         self.is_recording = True
 
