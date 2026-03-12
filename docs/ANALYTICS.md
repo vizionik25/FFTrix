@@ -19,6 +19,11 @@ Utilizes **HOG (Histogram of Oriented Gradients)** with a pre-trained SVM people
 Implements multi-scale cascade classifiers for rapid face localization.
 - **Feedback:** Displays a cyan "FACE DETECTED" bounding box.
 
+### 4. License Plate Recognition (LPR)
+Uses a two-stage pipeline with OpenCV morphology for plate localization and Tesseract OCR for text extraction.
+- **Precision:** Filters candidates by contour area and aspect ratio before running OCR on the ROI.
+- **Feedback:** Displays a green bounding box featuring the OCR text and confidence percentage.
+
 ---
 
 ## 📐 Smart Zoning
@@ -44,4 +49,5 @@ Smart Zoning allows you to define specific areas of interest (AOIs) within a vid
 When a trigger is tripped *inside* a zone:
 1. The system creates a **High-Priority Flag** in the database.
 2. The event is instantly pushed to the **Incident Timeline** in the dashboard.
-3. If 24/7 recording is active, these flags serve as index points for forensic review.
+3. If configured, the **Alert Dispatcher** (`alerts.py`) sends immediate Email and/or Webhook notifications (e.g., Slack, Discord) respecting a customizable per-camera cooldown period.
+4. If 24/7 recording is active, these flags serve as index points for forensic review.

@@ -31,6 +31,11 @@ FFTrix features a high-performance DVR subsystem powered by `WriteGear`.
 - **Optimization:** Encoding is handled in background threads to ensure the live monitoring grid remains fluid.
 - **Location:** All footage is stored in the project's `recordings/` directory by default.
 
+### Clip Extraction:
+The built-in **Clip Exporter** (`clipper.py`) can stitch and extract time-ranged MP4 clips from the segmented DVR footage. 
+- You specify a start and end epoch timestamp.
+- The exporter identifies the relevant chunks and uses the `ffmpeg` concat demuxer to stitch them into a single continuous export file without requiring a re-encode.
+
 ---
 
 ## 📂 File Structure
@@ -48,5 +53,6 @@ FFTrix features a high-performance DVR subsystem powered by `WriteGear`.
 ---
 
 ## 🧹 Maintenance
+- **Automated Retention Policy:** The `RetentionManager` module runs a nightly background thread to automatically delete recording segments older than a configurable `retention_days` setting per-camera.
 - **Manual Deletion:** Old footage can be managed via the standard OS file explorer.
 - **Database Backups:** The `fftrix_system.db` file can be backed up simply by copying it while the server is offline.
