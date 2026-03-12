@@ -5,6 +5,8 @@ build/
 dist/
 wheels/
 *.egg-info
+.pytest_cache/
+.coverage
 
 # Virtual environments
 .venv
@@ -21,3 +23,5 @@ fftrix_system.db
 # Environment variables
 .env
 
+# NiceGUI
+.nicegui

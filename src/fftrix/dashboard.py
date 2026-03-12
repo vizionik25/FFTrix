@@ -6,12 +6,16 @@ import time
 import json
 import threading
 import warnings
+from pathlib import Path
 from nicegui import ui, app
 from fastapi.responses import RedirectResponse
-from .database import Database, RECORDINGS_DIR
+from .database import Database, RECORDINGS_DIR, SNAPSHOTS_DIR, STATIC_DIR
 from .engine import CameraNode
 from .analytics import AnalyticsPipeline
+from .alerts import AlertManager
+from .retention import RetentionManager
 from .discovery import ONVIFDiscovery, DiscoveredDevice
+from .clipper import ClipExporter
 
 class Dashboard:
     def __init__(self, db=None, analytics=None):
@@ -60,7 +64,8 @@ class Dashboard:
 
     def handle_login(self, username, password):
         if self.db.verify_user(username, password):
-            app.storage.user.update({'authenticated': True, 'username': username})
+            role = self.db.get_user_role(username)
+            app.storage.user.update({'authenticated': True, 'username': username, 'role': role})
             if self.db.is_default_credentials():
                 # Keep them on the login page until they change defaults
                 self._show_first_use_dialog(username)
@@ -69,6 +74,10 @@ class Dashboard:
             return True
         ui.notify('Invalid credentials', type='negative')
         return False
+
+    def is_admin(self) -> bool:
+        """Return True if the currently logged-in user has the admin role."""
+        return app.storage.user.get('role', 'admin') == 'admin'
 
     def handle_logout(self):
         app.storage.user.update({'authenticated': False})
@@ -161,28 +170,40 @@ class Dashboard:
 
     def build_ui(self):
         with ui.header().classes('items-center justify-between'):
-            ui.label('🎥 FFTrix').classes('text-h6 text-bold')
+            ui.label('FFTrix NVR').classes('text-h6 text-bold')
+            with ui.row().classes('items-center gap-2'):
+                role = app.storage.user.get('role', 'admin')
+                user_name = app.storage.user.get('username', '')
+                ui.badge(role, color='teal' if role == 'admin' else 'grey').props('outline')
+                ui.label(user_name).classes('text-caption text-white')
             ui.button('Logout', on_click=self.handle_logout, icon='logout').props('flat color=white')
         with ui.row().classes('w-full no-wrap'):
             self._build_sidebar()
-            self._build_grid()
+            with ui.column().classes('flex-grow'):
+                self._build_grid()
+                self._build_health_widget()
             self._build_timeline()
         ui.timer(0.05, self._update_ui_loop)
 
     def _build_sidebar(self):
         with ui.column().classes('q-pa-md bg-grey-9 rounded shadow-2').style('min-width:260px;max-width:280px'):
-            ui.label('Add Camera').classes('text-subtitle1 text-bold')
-            name_in = ui.input('Name').props('outlined dense')
-            url_in = ui.input('Source URL / Index').props('outlined dense')
-            mode_sel = ui.select(
-                options=['none', 'motion', 'object', 'face', 'edge', 'ocr'],
-                value='none', label='AI Mode'
-            ).props('outlined dense')
-            ui.button('Add', icon='add',
-                      on_click=lambda: self.add_camera_ui(name_in.value, url_in.value, mode_sel.value)
-                      ).classes('full-width')
+            if self.is_admin():
+                ui.label('Add Camera').classes('text-subtitle1 text-bold')
+                name_in = ui.input('Name').props('outlined dense')
+                url_in = ui.input('Source URL / Index').props('outlined dense')
+                mode_sel = ui.select(
+                    options=['none', 'motion', 'object', 'face', 'edge', 'ocr', 'lpr'],
+                    value='none', label='AI Mode'
+                ).props('outlined dense')
+                ui.button('Add', icon='add',
+                          on_click=lambda: self.add_camera_ui(name_in.value, url_in.value, mode_sel.value)
+                          ).classes('full-width')
+                ui.separator()
+            else:
+                with ui.row().classes('items-center q-mb-sm'):
+                    ui.icon('visibility', color='teal').classes('q-mr-xs')
+                    ui.label('Viewer mode — read only').classes('text-caption text-teal')
 
-            ui.separator()
             ui.label('Cameras').classes('text-subtitle1 text-bold')
             self.camera_list_container = ui.column().classes('w-full')
             self._refresh_camera_list()
@@ -192,8 +213,9 @@ class Dashboard:
             self.controls_container = ui.column().classes('w-full')
             self._refresh_controls()
 
-            ui.separator()
-            self._build_discovery_panel()
+            if self.is_admin():
+                ui.separator()
+                self._build_discovery_panel()
 
 
     def _refresh_camera_list(self):
@@ -227,31 +249,134 @@ class Dashboard:
         cam_id = self.selected_cam_id
         cam_cfg = next((c for c in self.db.get_cameras() if c['id'] == cam_id), {})
         with self.controls_container:
-            # 24/7 recording toggle
-            rec = ui.switch('24/7 Record',
-                            value=cam_cfg.get('record_247', False),
-                            on_change=lambda e: self.db.update_camera_config(cam_id, record_247=e.value))
-            # Zone draw / clear
-            with ui.row():
-                ui.button('Draw Zone', icon='crop',
-                          on_click=lambda: setattr(self, 'is_drawing_zone', True)).props('dense')
-                ui.button('Clear Zones', icon='clear',
-                          on_click=lambda: [
-                              self.analytics.zones.update({cam_id: []}),
-                              self.db.update_camera_config(cam_id, zones=[]),
-                              self._refresh_grid()
-                          ]).props('dense color=warning')
-            # Watermark
-            wm_cfg = cam_cfg.get('watermark', {})
-            ui.input('Watermark Text', value=wm_cfg.get('text', ''),
-                     on_change=lambda e: self.update_watermark(cam_id, 'text', e.value)
-                     ).props('outlined dense')
-            ui.select(options=['static', 'floating'], value=wm_cfg.get('mode', 'static'),
-                      label='WM Mode',
-                      on_change=lambda e: self.update_watermark(cam_id, 'mode', e.value)
-                      ).props('outlined dense')
-            ui.slider(min=0.0, max=1.0, step=0.05, value=wm_cfg.get('transparency', 0.5),
-                      on_change=lambda e: self.update_watermark(cam_id, 'transparency', e.value))
+            if self.is_admin():
+                # 24/7 recording toggle
+                ui.switch('24/7 Record',
+                          value=cam_cfg.get('record_247', False),
+                          on_change=lambda e: self.db.update_camera_config(cam_id, record_247=e.value))
+                # Zone draw / clear
+                with ui.row():
+                    ui.button('Draw Zone', icon='crop',
+                              on_click=lambda: setattr(self, 'is_drawing_zone', True)).props('dense')
+                    ui.button('Clear Zones', icon='clear',
+                              on_click=lambda: [
+                                  self.analytics.zones.update({cam_id: []}),
+                                  self.db.update_camera_config(cam_id, zones=[]),
+                                  self._refresh_grid()
+                              ]).props('dense color=warning')
+                # Watermark
+                wm_cfg = cam_cfg.get('watermark', {})
+                ui.input('Watermark Text', value=wm_cfg.get('text', ''),
+                         on_change=lambda e: self.update_watermark(cam_id, 'text', e.value)
+                         ).props('outlined dense')
+                ui.select(options=['static', 'floating'], value=wm_cfg.get('mode', 'static'),
+                          label='WM Mode',
+                          on_change=lambda e: self.update_watermark(cam_id, 'mode', e.value)
+                          ).props('outlined dense')
+                ui.slider(min=0.0, max=1.0, step=0.05, value=wm_cfg.get('transparency', 0.5),
+                          on_change=lambda e: self.update_watermark(cam_id, 'transparency', e.value))
+
+                # ---- PTZ Controls ----
+                xaddr = cam_cfg.get('xaddr', '')
+                if xaddr:
+                    ui.separator()
+                    ui.label('PTZ').classes('text-caption text-bold')
+                    self._build_ptz_panel(cam_id, xaddr)
+
+                # ---- Privacy Zones ----
+                ui.separator()
+                ui.label('Privacy Zones').classes('text-caption text-bold')
+                self._build_privacy_panel(cam_id, cam_cfg)
+
+                # ---- Arm Schedule ----
+                ui.separator()
+                ui.label('Arm Schedule').classes('text-caption text-bold')
+                self._build_arm_schedule_panel(cam_id, cam_cfg)
+
+    def _build_ptz_panel(self, cam_id: str, xaddr: str):
+        """Render a D-pad + zoom control strip for a PTZ camera."""
+        from .ptz import PTZController
+        ptz = PTZController(xaddr=xaddr)
+
+        # D-pad grid: up / stop / zoom-in / left / right / zoom-out / down
+        with ui.grid(columns=3).classes('gap-0'):
+            ui.label('')
+            ui.button(icon='arrow_upward',    on_click=lambda: ptz.move('up')).props('dense flat')
+            ui.button(icon='zoom_in',         on_click=lambda: ptz.zoom('in')).props('dense flat')
+            ui.button(icon='arrow_back',      on_click=lambda: ptz.move('left')).props('dense flat')
+            ui.button(icon='stop',            on_click=lambda: ptz.stop()).props('dense flat color=warning')
+            ui.button(icon='arrow_forward',   on_click=lambda: ptz.move('right')).props('dense flat')
+            ui.label('')
+            ui.button(icon='arrow_downward',  on_click=lambda: ptz.move('down')).props('dense flat')
+            ui.button(icon='zoom_out',        on_click=lambda: ptz.zoom('out')).props('dense flat')
+
+    def _build_privacy_panel(self, cam_id: str, cam_cfg: dict):
+        """Pixel-region privacy zone list with add/remove."""
+        zones = list(cam_cfg.get('privacy_zones') or [])
+        x1_in = ui.input('x1', value='0').props('outlined dense').style('max-width:60px')
+        y1_in = ui.input('y1', value='0').props('outlined dense').style('max-width:60px')
+        x2_in = ui.input('x2', value='100').props('outlined dense').style('max-width:60px')
+        y2_in = ui.input('y2', value='100').props('outlined dense').style('max-width:60px')
+
+        def _add_zone():
+            try:
+                zone = [int(x1_in.value), int(y1_in.value), int(x2_in.value), int(y2_in.value)]
+                zones.append(zone)
+                self.analytics.set_config(cam_id, privacy_zones=zones)
+                self.db.update_camera_config(cam_id, privacy_zones=zones)
+                ui.notify('Privacy zone added', type='positive')
+            except ValueError:
+                ui.notify('Enter integer pixel values', type='warning')
+
+        with ui.row():
+            x1_in; y1_in; x2_in; y2_in
+            ui.button('Add', icon='add', on_click=_add_zone).props('dense')
+
+        if zones:
+            for i, z in enumerate(zones):
+                with ui.row().classes('items-center'):
+                    ui.label(f'Zone {i+1}: {z}').classes('text-caption')
+                    ui.button(icon='delete', on_click=lambda _, idx=i: [
+                        zones.pop(idx),
+                        self.analytics.set_config(cam_id, privacy_zones=zones),
+                        self.db.update_camera_config(cam_id, privacy_zones=zones),
+                        self._refresh_controls()
+                    ]).props('dense flat color=negative')
+
+    def _build_arm_schedule_panel(self, cam_id: str, cam_cfg: dict):
+        """Arm schedule: add time-window rules per day-of-week."""
+        schedule = list(cam_cfg.get('arm_schedule') or [])
+        days_of_week = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+        start_in = ui.input('Start HH:MM', value='08:00').props('outlined dense').style('max-width:90px')
+        end_in   = ui.input('End HH:MM',   value='18:00').props('outlined dense').style('max-width:90px')
+        day_checks = []
+        with ui.row().classes('flex-wrap'):
+            for i, d in enumerate(days_of_week):
+                cb = ui.checkbox(d, value=(i < 5))  # Mon-Fri default
+                day_checks.append(cb)
+
+        def _add_rule():
+            selected_days = [i for i, cb in enumerate(day_checks) if cb.value]
+            rule = {'days': selected_days, 'start': start_in.value, 'end': end_in.value}
+            schedule.append(rule)
+            self.analytics.set_config(cam_id, arm_schedule=schedule)
+            self.db.update_camera_config(cam_id, arm_schedule=schedule)
+            self._refresh_controls()
+
+        ui.button('Add Rule', icon='schedule', on_click=_add_rule).props('dense')
+
+        for i, rule in enumerate(schedule):
+            day_labels = [days_of_week[d] for d in rule.get('days', [])]
+            desc = f"{', '.join(day_labels)} {rule.get('start')}–{rule.get('end')}"
+            with ui.row().classes('items-center'):
+                ui.label(desc).classes('text-caption')
+                ui.button(icon='delete', on_click=lambda _, idx=i: [
+                    schedule.pop(idx),
+                    self.analytics.set_config(cam_id, arm_schedule=schedule),
+                    self.db.update_camera_config(cam_id, arm_schedule=schedule),
+                    self._refresh_controls()
+                ]).props('dense flat color=negative')
+
 
     def _build_grid(self):
         self.grid_container = ui.grid(columns=self.grid_columns).classes('flex-grow')
@@ -259,7 +384,7 @@ class Dashboard:
 
     def _build_discovery_panel(self):
         """Render the ONVIF auto-discovery section in the sidebar."""
-        ui.label('🔍 ONVIF Discovery').classes('text-subtitle1 text-bold')
+        ui.label('ONVIF Discovery').classes('text-subtitle1 text-bold')
         self._disc_user_in = ui.input('Username (opt.)').props('outlined dense')
         self._disc_pass_in = ui.input('Password (opt.)', password=True).props('outlined dense')
         self._disc_timeout_sel = ui.select(
@@ -273,6 +398,62 @@ class Dashboard:
             ui.button(icon='clear', on_click=self._clear_discovery).props('flat dense')
         self.discovery_list_container = ui.column().classes('w-full')
         self._refresh_discovery_list()
+
+    def _build_recordings_panel(self):
+        """Browse and export recordings for the selected camera (admin only)."""
+        if not self.is_admin():
+            return
+        ui.separator()
+        ui.label('Recordings').classes('text-subtitle1 text-bold')
+        if not self.selected_cam_id or self.selected_cam_id not in self.cameras:
+            ui.label('Select a camera first.').classes('text-caption text-grey')
+            return
+        cam_id = self.selected_cam_id
+        exporter = ClipExporter(recordings_root=RECORDINGS_DIR)
+        segments = exporter.list_segments(cam_id)
+        if not segments:
+            ui.label('No recordings found.').classes('text-caption text-grey')
+            return
+        for seg in segments[-10:][::-1]:  # show latest 10
+            size_mb = round(seg['size'] / 1_048_576, 2)
+            import datetime
+            ts = datetime.datetime.fromtimestamp(seg['mtime']).strftime('%Y-%m-%d %H:%M')
+            with ui.row().classes('items-center full-width'):
+                ui.label(f"{ts}  {size_mb} MB").classes('text-caption flex-grow')
+                ui.button(icon='download', on_click=lambda s=seg: [
+                    exporter.export_async(cam_id, start_ts=s['mtime'] - 1, end_ts=s['mtime'] + 1,
+                                         callback=lambda p: ui.notify(
+                                             f'Exported: {Path(p).name}' if p else 'Export failed',
+                                             type='positive' if p else 'negative'))
+                ]).props('flat dense')
+                ui.button(icon='delete', on_click=lambda s=seg: [
+                    exporter.delete_segment(s['path']),
+                    self._refresh_controls()
+                ]).props('flat dense color=negative')
+
+    def _build_health_widget(self):
+        """Row of per-camera health stat cards shown below the video grid."""
+        self._health_container = ui.row().classes('q-pa-sm gap-2 flex-wrap')
+        ui.timer(2.0, self._refresh_health)
+
+    def _refresh_health(self):
+        if not hasattr(self, '_health_container'):
+            return
+        self._health_container.clear()
+        with self._health_container:
+            for cam_id, node in self.cameras.items():
+                h = node.get_health()
+                color = 'teal' if h['running'] else 'red'
+                with ui.card().classes('q-pa-xs'):
+                    with ui.row().classes('items-center gap-1'):
+                        ui.icon('circle', color=color, size='xs')
+                        ui.label(h['name']).classes('text-caption text-bold')
+                    ui.label(f"{h['fps']} fps").classes('text-caption')
+                    ui.label(f"Up {h['uptime_s']}s").classes('text-caption text-grey')
+                    ui.label(f"{h['frames_processed']} frames").classes('text-caption text-grey')
+                    if h['dropped_frames']:
+                        ui.label(f"{h['dropped_frames']} dropped").classes('text-caption text-warning')
+
 
     def _run_discovery_scan(self):
         """Launch a WS-Discovery scan in a background thread."""
@@ -373,6 +554,9 @@ class Dashboard:
                     ui.label(f"[{ev['type']}] {ev['source']}").classes('text-caption text-bold')
                     ui.label(ev['details']).classes('text-caption')
                     ui.label(ev['timestamp']).classes('text-caption text-grey')
+                    snap = ev.get('snapshot_path')
+                    if snap and Path(snap).exists():
+                        ui.image(snap).classes('w-full rounded').style('max-height:120px;object-fit:cover')
 
     async def _update_ui_loop(self):
         self._timeline_tick += 1
@@ -384,6 +568,50 @@ class Dashboard:
             if hasattr(node, 'ui_image') and getattr(node, 'processed_frame', None) is not None:
                 _, buf = cv2.imencode('.jpg', node.processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
                 node.ui_image.set_source(f'data:image/jpeg;base64,{base64.b64encode(buf).decode("utf-8")}')
+
+
+def _write_pwa_manifest(port: int) -> str:
+    """Write manifest.json to STATIC_DIR and return its public URL."""
+    import json as _json
+    manifest = {
+        "name": "FFTrix NVR",
+        "short_name": "FFTrix",
+        "description": "Intelligent Network Video Recorder",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#121212",
+        "theme_color": "#009688",
+        "orientation": "any",
+        "icons": [
+            {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png"},
+            {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png"},
+        ],
+        "screenshots": [],
+    }
+    STATIC_DIR.mkdir(parents=True, exist_ok=True)
+    manifest_path = STATIC_DIR / 'manifest.json'
+    manifest_path.write_text(_json.dumps(manifest, indent=2))
+    return '/static/manifest.json'
+
+
+def _add_pwa_head_tags():
+    """Inject PWA and mobile-optimised <head> tags into the NiceGUI page."""
+    ui.add_head_html('<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">')
+    ui.add_head_html('<meta name="mobile-web-app-capable" content="yes">')
+    ui.add_head_html('<meta name="apple-mobile-web-app-capable" content="yes">')
+    ui.add_head_html('<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">')
+    ui.add_head_html('<meta name="apple-mobile-web-app-title" content="FFTrix">')
+    ui.add_head_html('<meta name="theme-color" content="#009688">')
+    ui.add_head_html('<link rel="manifest" href="/static/manifest.json">')
+    ui.add_head_html(
+        '<style>'
+        'body{-webkit-text-size-adjust:100%;}'
+        '@media(max-width:768px){'
+        '.q-drawer{width:100%!important;}'
+        '.nicegui-content{flex-direction:column!important;}'
+        '}'
+        '</style>'
+    )
 
 
 def run_dashboard(remote=False):
@@ -407,6 +635,20 @@ def run_dashboard(remote=False):
         except Exception:
             pass
 
-    dashboard = Dashboard()
+    db = Database()
+    alert_manager = AlertManager()
+    analytics = AnalyticsPipeline(db=db, alert_manager=alert_manager, snapshots_dir=SNAPSHOTS_DIR)
+    dashboard = Dashboard(db=db, analytics=analytics)
+
+    # Write PWA manifest and inject head tags
+    _write_pwa_manifest(port)
+    app.add_static_files('/static', str(STATIC_DIR))
+    _add_pwa_head_tags()
+
+    # Start nightly retention cleanup
+    retention = RetentionManager(db=db, recordings_root=RECORDINGS_DIR)
+    retention.start()
+
     # reload=False is critical when running as an installed package to avoid RuntimeError
-    ui.run(title="FFTrix", port=port, host=host, storage_secret=secret, reload=False, show=False, dark=True)
+    ui.run(title="FFTrix NVR", port=port, host=host, storage_secret=secret,
+           reload=False, show=False, dark=True)

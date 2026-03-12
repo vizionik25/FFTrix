@@ -14,8 +14,8 @@ class CameraNode:
         self.stream = None
         self.writer = None
         self.is_running = False
-        self.is_recording = False # Manual/Trigger recording
-        self.record_247 = record_247 # Continuous recording
+        self.is_recording = False  # Manual/Trigger recording
+        self.record_247 = record_247  # Continuous recording
         self.analytics = analytics_pipeline
         self.db = db
         self.processed_frame = np.zeros((480, 640, 3), np.uint8)
@@ -23,6 +23,31 @@ class CameraNode:
         self.fps = 0
         self.trigger_active = False
         self.last_trigger_time = 0
+        # Health stats
+        self.frames_processed = 0
+        self.dropped_frames = 0
+        self.start_time: float | None = None
+        self._fps_buf: list[float] = []  # rolling frame timestamps
+
+    def get_health(self) -> dict:
+        """Return a snapshot of runtime health metrics."""
+        uptime = (time.time() - self.start_time) if self.start_time else 0.0
+        # Compute rolling FPS from last 30 frame timestamps
+        buf = self._fps_buf[-30:]
+        if len(buf) >= 2:
+            fps = (len(buf) - 1) / max(buf[-1] - buf[0], 1e-9)
+        else:
+            fps = 0.0
+        return {
+            'cam_id': self.id,
+            'name': self.name,
+            'running': self.is_running,
+            'recording': self.is_recording or self.record_247,
+            'uptime_s': round(uptime, 1),
+            'fps': round(fps, 1),
+            'frames_processed': self.frames_processed,
+            'dropped_frames': self.dropped_frames,
+        }
         
     def start(self):
         if self.is_running: return
@@ -34,6 +59,7 @@ class CameraNode:
             processed_src = int(self.source) if str(self.source).isdigit() else self.source
             self.stream = VideoGear(source=processed_src, logging=False, **options).start()
             self.is_running = True
+            self.start_time = time.time()
             
             # Start 24/7 writer if enabled
             if self.record_247:
@@ -56,12 +82,19 @@ class CameraNode:
         while self.is_running:
             if not self.stream: break
             frame = self.stream.read()
-            if frame is None: continue
+            if frame is None:
+                self.dropped_frames += 1
+                continue
             
             # AI Processing
             try:
                 proc, triggered = self.analytics.process(frame, self.id)
                 self.processed_frame = proc
+                self.frames_processed += 1
+                now_ts = time.time()
+                self._fps_buf.append(now_ts)
+                if len(self._fps_buf) > 60:
+                    self._fps_buf = self._fps_buf[-60:]
                 
                 # Flag Logic (Intelligent Cooldown)
                 if triggered:

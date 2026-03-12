@@ -10,9 +10,9 @@ def handle_serve(ui=True, remote=False):
         run_dashboard(remote=remote)
     return True
 
-def handle_user_add(username, password):
+def handle_user_add(username, password, role='admin'):
     db = Database(db_path=str(DB_PATH))
-    db.add_user(username, password)
+    db.add_user(username, password, role=role)
     return True
 
 @click.group()
@@ -25,7 +25,7 @@ def cli():
 @click.option('--remote', is_flag=True, default=False)
 def serve(ui, remote):
     """Start the FFTrix Surveillance Server."""
-    click.echo("🚀 Launching FFTrix...")
+    click.echo("Launching FFTrix...")
     handle_serve(ui=ui, remote=remote)
 
 @cli.group()
@@ -36,19 +36,23 @@ def user():
 @user.command(name='add')
 @click.argument('username')
 @click.password_option()
-def add_user(username, password):
+@click.option('--role', type=click.Choice(['admin', 'viewer'], case_sensitive=False),
+              default='admin', show_default=True, help='Role for the new operator.')
+def add_user(username, password, role):
     """Provision a new operator."""
-    handle_user_add(username, password)
-    click.echo(f"✅ Operator '{username}' provisioned.")
+    handle_user_add(username, password, role=role)
+    click.echo(f"Operator '{username}' provisioned with role '{role}'.")
 
 @user.command(name='list')
 def list_users():
     """List operators."""
     db = Database(db_path=str(DB_PATH))
     cur = db.conn.cursor()
-    cur.execute("SELECT username FROM users")
+    cur.execute("SELECT username, role FROM users")
     users = cur.fetchall()
-    for u in users: click.echo(f"- {u[0]}")
+    for u in users:
+        role_label = u[1] if u[1] else 'admin'
+        click.echo(f"- {u[0]}  [{role_label}]")
 
 @user.command(name='delete')
 @click.argument('username')
