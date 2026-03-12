@@ -596,13 +596,13 @@ def _write_pwa_manifest(port: int) -> str:
 
 def _add_pwa_head_tags():
     """Inject PWA and mobile-optimised <head> tags into the NiceGUI page."""
-    ui.add_head_html('<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">')
-    ui.add_head_html('<meta name="mobile-web-app-capable" content="yes">')
-    ui.add_head_html('<meta name="apple-mobile-web-app-capable" content="yes">')
-    ui.add_head_html('<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">')
-    ui.add_head_html('<meta name="apple-mobile-web-app-title" content="FFTrix">')
-    ui.add_head_html('<meta name="theme-color" content="#009688">')
-    ui.add_head_html('<link rel="manifest" href="/static/manifest.json">')
+    ui.add_head_html('<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">', shared=True)
+    ui.add_head_html('<meta name="mobile-web-app-capable" content="yes">', shared=True)
+    ui.add_head_html('<meta name="apple-mobile-web-app-capable" content="yes">', shared=True)
+    ui.add_head_html('<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">', shared=True)
+    ui.add_head_html('<meta name="apple-mobile-web-app-title" content="FFTrix">', shared=True)
+    ui.add_head_html('<meta name="theme-color" content="#009688">', shared=True)
+    ui.add_head_html('<link rel="manifest" href="/static/manifest.json">', shared=True)
     ui.add_head_html(
         '<style>'
         'body{-webkit-text-size-adjust:100%;}'
@@ -610,7 +610,7 @@ def _add_pwa_head_tags():
         '.q-drawer{width:100%!important;}'
         '.nicegui-content{flex-direction:column!important;}'
         '}'
-        '</style>'
+        '</style>', shared=True
     )
 
 
