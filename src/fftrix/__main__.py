@@ -59,5 +59,29 @@ def delete_user(username):
     db.conn.commit()
     click.echo(f"❌ Revoked '{username}'.")
 
+@user.command(name='reset-password')
+@click.argument('username')
+@click.password_option(prompt='New password', confirmation_prompt='Confirm new password')
+def reset_password(username, password):
+    """Reset an operator's password (use when locked out)."""
+    db = Database(db_path=str(DB_PATH))
+    cur = db.conn.cursor()
+    cur.execute("SELECT 1 FROM users WHERE username=?", (username,))
+    if not cur.fetchone():
+        click.echo(f"❌ User '{username}' not found. Use 'fftrix user list' to see all users.", err=True)
+        sys.exit(1)
+    db.change_user_password(username, username, password)
+    click.echo(f"✅ Password updated for '{username}'. You can now log in with the new password.")
+
+@user.command(name='reset-admin')
+@click.confirmation_option(prompt='⚠️  This will delete ALL users and reset admin:admin. Continue?')
+def reset_admin():
+    """Emergency factory reset: wipes all users, recreates admin:admin.\n\nOn next login the first-use dialog forces you to set a new password."""
+    db = Database(db_path=str(DB_PATH))
+    db.conn.execute("DELETE FROM users")
+    db.conn.commit()
+    db._init_default_user()  # recreates admin:admin
+    click.echo("✅ All users cleared. Login with admin:admin — you'll be forced to change it immediately.")
+
 if __name__ == "__main__":
     cli()

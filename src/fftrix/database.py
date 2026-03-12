@@ -32,6 +32,12 @@ class Database:
         
         self.conn.execute('''CREATE TABLE IF NOT EXISTS users
                              (username TEXT PRIMARY KEY, password_hash TEXT)''')
+
+        self.conn.execute('''CREATE TABLE IF NOT EXISTS discovered_devices
+                             (ip TEXT PRIMARY KEY, xaddr TEXT, name TEXT,
+                              manufacturer TEXT, model TEXT, firmware TEXT,
+                              serial TEXT, rtsp_uris TEXT,
+                              requires_auth INTEGER DEFAULT 0, last_seen REAL)''')
         self.conn.commit()
 
     def _init_default_user(self):
@@ -52,6 +58,27 @@ class Database:
         cur.execute("SELECT password_hash FROM users WHERE username=?", (username,))
         row = cur.fetchone()
         return row and row[0] == pw_hash
+
+    def is_default_credentials(self) -> bool:
+        """Return True if the default admin:admin credentials are still active."""
+        default_hash = hashlib.sha256(b"admin").hexdigest()
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM users WHERE username=? AND password_hash=?",
+            ("admin", default_hash),
+        )
+        return cur.fetchone() is not None
+
+    def change_user_password(self, old_username: str, new_username: str, new_password: str) -> None:
+        """Rename a user and set a new password atomically."""
+        pw_hash = hashlib.sha256(new_password.encode()).hexdigest()
+        self.conn.execute("DELETE FROM users WHERE username=?", (old_username,))
+        self.conn.execute(
+            "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+            (new_username, pw_hash),
+        )
+        self.conn.commit()
+
 
     def log_event(self, event_type, source, details="", is_flag=0):
         self.conn.execute("INSERT INTO events (timestamp, type, source, details, is_flag) VALUES (?, ?, ?, ?, ?)",
@@ -90,4 +117,53 @@ class Database:
     
     def remove_camera(self, cam_id):
         self.conn.execute("DELETE FROM cameras WHERE id=?", (cam_id,))
+        self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Discovered Devices (ONVIF scan cache)
+    # ------------------------------------------------------------------
+
+    def upsert_discovered_device(self, device: dict) -> None:
+        """Insert or update a discovered ONVIF device record."""
+        self.conn.execute(
+            """INSERT OR REPLACE INTO discovered_devices
+               (ip, xaddr, name, manufacturer, model, firmware, serial,
+                rtsp_uris, requires_auth, last_seen)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                device.get("ip", ""),
+                device.get("xaddr", ""),
+                device.get("name", ""),
+                device.get("manufacturer", ""),
+                device.get("model", ""),
+                device.get("firmware", ""),
+                device.get("serial", ""),
+                json.dumps(device.get("rtsp_uris", [])),
+                int(device.get("requires_auth", False)),
+                time.time(),
+            ),
+        )
+        self.conn.commit()
+
+    def get_discovered_devices(self) -> list[dict]:
+        """Return all cached discovered devices, most-recently-seen first."""
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT ip, xaddr, name, manufacturer, model, firmware, serial, "
+            "rtsp_uris, requires_auth, last_seen FROM discovered_devices ORDER BY last_seen DESC"
+        )
+        return [
+            {
+                "ip": r[0], "xaddr": r[1], "name": r[2],
+                "manufacturer": r[3], "model": r[4], "firmware": r[5],
+                "serial": r[6], "rtsp_uris": json.loads(r[7]) if r[7] else [],
+                "requires_auth": bool(r[8]),
+                "last_seen": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r[9])) if r[9] else "",
+            }
+            for r in cur.fetchall()
+        ]
+
+    def clear_discovered_devices(self) -> None:
+        """Remove all cached discovered devices."""
+        self.conn.execute("DELETE FROM discovered_devices")
         self.conn.commit()

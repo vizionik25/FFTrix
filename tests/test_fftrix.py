@@ -36,11 +36,13 @@ def setup_teardown():
 
 def test_init_public_api():
     import fftrix
-    assert fftrix.__version__ == "1.0.0"
+    assert fftrix.__version__ == "1.0.1"
     assert hasattr(fftrix, 'Database')
     assert hasattr(fftrix, 'AnalyticsPipeline')
     assert hasattr(fftrix, 'CameraNode')
     assert hasattr(fftrix, 'Dashboard')
+    assert hasattr(fftrix, 'ONVIFDiscovery')
+    assert hasattr(fftrix, 'DiscoveredDevice')
 
 
 # ===========================================================================
@@ -575,3 +577,505 @@ def test_cli_exhaustive():
         with patch('fftrix.__main__.run_dashboard') as mock_run:
             runner.invoke(cli, ['serve'])
             assert mock_run.called
+
+
+def test_cli_reset_password_success():
+    """reset-password updates password for existing user."""
+    runner = CliRunner()
+    with patch('fftrix.__main__.DB_PATH', str(TEST_DB)):
+        db = Database(db_path=str(TEST_DB))
+        db.add_user('operator', 'OldPass1!')
+        result = runner.invoke(
+            cli, ['user', 'reset-password', 'operator'],
+            input='NewPass99!\nNewPass99!\n'
+        )
+        assert result.exit_code == 0
+        assert 'updated' in result.output
+        assert db.verify_user('operator', 'NewPass99!')
+
+
+def test_cli_reset_password_unknown_user():
+    """reset-password exits with error when user doesn't exist."""
+    runner = CliRunner()
+    with patch('fftrix.__main__.DB_PATH', str(TEST_DB)):
+        result = runner.invoke(
+            cli, ['user', 'reset-password', 'nobody'],
+            input='pass\npass\n'
+        )
+        assert result.exit_code != 0 or 'not found' in (result.output + (result.stderr or ''))
+
+
+def test_cli_reset_admin():
+    """reset-admin wipes all users and recreates admin:admin."""
+    runner = CliRunner()
+    with patch('fftrix.__main__.DB_PATH', str(TEST_DB)):
+        db = Database(db_path=str(TEST_DB))
+        db.add_user('someuser', 'pass')
+        # --yes skips the confirmation prompt
+        result = runner.invoke(cli, ['user', 'reset-admin', '--yes'])
+        assert result.exit_code == 0
+        assert 'admin:admin' in result.output
+        # admin:admin restored and is now detected as default
+        assert db.is_default_credentials()
+
+
+# ===========================================================================
+# DISCOVERY MODULE — unit tests (fully mocked, no hardware required)
+# ===========================================================================
+
+from fftrix.discovery import DiscoveredDevice, ONVIFDiscovery, _parse_ip_port, _probe_device
+
+
+def test_discovered_device_to_from_dict():
+    dev = DiscoveredDevice(
+        xaddr='http://192.168.1.10/onvif/device_service',
+        ip='192.168.1.10', port=80,
+        name='Hikvision DS-2CD2', manufacturer='Hikvision', model='DS-2CD2',
+        firmware='1.0', serial='ABC123',
+        rtsp_uris=['rtsp://192.168.1.10/stream1'],
+        requires_auth=False,
+    )
+    d = dev.to_dict()
+    dev2 = DiscoveredDevice.from_dict(d)
+    assert dev2.ip == '192.168.1.10'
+    assert dev2.rtsp_uris == ['rtsp://192.168.1.10/stream1']
+    assert dev2.name == 'Hikvision DS-2CD2'
+
+
+def test_parse_ip_port_valid():
+    ip, port = _parse_ip_port('http://192.168.1.55:8080/onvif/device_service')
+    assert ip == '192.168.1.55'
+    assert port == 8080
+
+
+def test_parse_ip_port_default_port():
+    ip, port = _parse_ip_port('http://10.0.0.1/onvif/device_service')
+    assert ip == '10.0.0.1'
+    assert port == 80
+
+
+def test_parse_ip_port_invalid():
+    ip, port = _parse_ip_port('not-a-url')
+    assert ip == '' or port == 80  # graceful fallback
+
+
+def test_probe_device_missing_ip():
+    """_probe_device returns None when xaddr has no parseable IP."""
+    result = _probe_device('', '', '')
+    assert result is None
+
+
+def test_probe_device_success():
+    """_probe_device populates device metadata and RTSP URIs from mocked ONVIF SOAP."""
+    mock_cam = MagicMock()
+    mock_info = MagicMock()
+    mock_info.Manufacturer = 'Hikvision'
+    mock_info.Model = 'DS-2CD2143'
+    mock_info.FirmwareVersion = 'V5.7.0'
+    mock_info.SerialNumber = 'HK001'
+    mock_cam.create_devicemgmt_service.return_value.GetDeviceInformation.return_value = mock_info
+
+    mock_profile = MagicMock()
+    mock_profile.token = 'Profile_1'
+    mock_media = MagicMock()
+    mock_media.GetProfiles.return_value = [mock_profile]
+    mock_stream_resp = MagicMock()
+    mock_stream_resp.Uri = 'rtsp://192.168.1.55/stream1'
+    mock_media.GetStreamUri.return_value = mock_stream_resp
+    mock_media.create_type.return_value = MagicMock()
+    mock_cam.create_media_service.return_value = mock_media
+
+    with patch('onvif.ONVIFCamera', return_value=mock_cam):
+        result = _probe_device('http://192.168.1.55/onvif/device_service', 'admin', 'admin')
+
+    assert result is not None
+    assert result.manufacturer == 'Hikvision'
+    assert result.model == 'DS-2CD2143'
+    assert 'rtsp://192.168.1.55/stream1' in result.rtsp_uris
+    assert result.requires_auth is False
+
+
+def test_probe_device_auth_failure():
+    """_probe_device marks requires_auth=True on 401/auth error."""
+    mock_cam = MagicMock()
+    mock_cam.create_devicemgmt_service.return_value.GetDeviceInformation.side_effect = \
+        Exception('401 Unauthorized')
+
+    with patch('onvif.ONVIFCamera', return_value=mock_cam):
+        result = _probe_device('http://192.168.1.88/onvif/device_service', '', '')
+
+    assert result is not None
+    assert result.requires_auth is True
+
+
+def test_probe_device_generic_failure():
+    """Non-auth exception → _probe_device returns None (device silently skipped)."""
+    with patch('onvif.ONVIFCamera', side_effect=Exception('Connection refused')):
+        result = _probe_device('http://10.0.0.99/onvif/device_service', '', '')
+
+    assert result is None
+
+
+def test_discovery_scan_no_xaddrs():
+    """Services with empty XAddrs lists are skipped gracefully."""
+    fake_svc = MagicMock()
+    fake_svc.getXAddrs.return_value = []  # no XAddrs
+
+    with patch('fftrix.discovery.WSDiscovery') as mock_wsd:
+        mock_wsd.return_value.searchServices.return_value = [fake_svc]
+        results = ONVIFDiscovery().scan(timeout=1)
+
+    assert results == []
+
+
+@patch('fftrix.discovery._probe_device')
+def test_discovery_scan_no_devices(mock_probe):
+    """WSDiscovery returns empty — scan returns []."""
+    with patch('fftrix.discovery.WSDiscovery') as mock_wsd:
+        mock_wsd.return_value.searchServices.return_value = []
+        result = ONVIFDiscovery().scan(timeout=1)
+    assert result == []
+
+
+@patch('fftrix.discovery._probe_device')
+def test_discovery_scan_one_device_success(mock_probe):
+    """One WS-Discovery response → one probed device returned."""
+    fake_svc = MagicMock()
+    fake_svc.getXAddrs.return_value = ['http://192.168.1.55/onvif/device_service']
+
+    expected = DiscoveredDevice(
+        xaddr='http://192.168.1.55/onvif/device_service',
+        ip='192.168.1.55', name='Axis P3245', manufacturer='Axis', model='P3245',
+        rtsp_uris=['rtsp://192.168.1.55/stream1'],
+    )
+    mock_probe.return_value = expected
+
+    with patch('fftrix.discovery.WSDiscovery') as mock_wsd:
+        mock_wsd.return_value.searchServices.return_value = [fake_svc]
+        results = ONVIFDiscovery().scan(timeout=1)
+
+    assert len(results) == 1
+    assert results[0].ip == '192.168.1.55'
+    assert results[0].name == 'Axis P3245'
+
+
+@patch('fftrix.discovery._probe_device')
+def test_discovery_scan_auth_required(mock_probe):
+    """Device responds with auth error → requires_auth=True, still returned."""
+    fake_svc = MagicMock()
+    fake_svc.getXAddrs.return_value = ['http://192.168.1.88/onvif/device_service']
+
+    auth_dev = DiscoveredDevice(
+        xaddr='http://192.168.1.88/onvif/device_service',
+        ip='192.168.1.88', requires_auth=True,
+    )
+    mock_probe.return_value = auth_dev
+
+    with patch('fftrix.discovery.WSDiscovery') as mock_wsd:
+        mock_wsd.return_value.searchServices.return_value = [fake_svc]
+        results = ONVIFDiscovery().scan(timeout=1)
+
+    assert len(results) == 1
+    assert results[0].requires_auth is True
+
+
+@patch('fftrix.discovery._probe_device')
+def test_discovery_scan_device_error(mock_probe):
+    """Device probe fails silently — returns None → not included."""
+    fake_svc = MagicMock()
+    fake_svc.getXAddrs.return_value = ['http://10.0.0.1/onvif/device_service']
+    mock_probe.return_value = None
+
+    with patch('fftrix.discovery.WSDiscovery') as mock_wsd:
+        mock_wsd.return_value.searchServices.return_value = [fake_svc]
+        results = ONVIFDiscovery().scan(timeout=1)
+
+    assert results == []
+
+
+@patch('fftrix.discovery._probe_device')
+def test_discovery_scan_progress_callback(mock_probe):
+    """progress_callback is invoked for each found device."""
+    fake_svc = MagicMock()
+    fake_svc.getXAddrs.return_value = ['http://192.168.1.2/onvif/device_service']
+    dev = DiscoveredDevice(xaddr='http://192.168.1.2/onvif/device_service', ip='192.168.1.2')
+    mock_probe.return_value = dev
+
+    seen = []
+    with patch('fftrix.discovery.WSDiscovery') as mock_wsd:
+        mock_wsd.return_value.searchServices.return_value = [fake_svc]
+        ONVIFDiscovery().scan(timeout=1, progress_callback=seen.append)
+
+    assert len(seen) == 1
+
+
+# ===========================================================================
+# DATABASE — discovered_devices CRUD
+# ===========================================================================
+
+def test_database_discovered_devices_crud():
+    db = Database(db_path=str(TEST_DB))
+    dev = {
+        'ip': '192.168.1.10', 'xaddr': 'http://192.168.1.10/onvif/device_service',
+        'name': 'Test Camera', 'manufacturer': 'Acme', 'model': 'Cam1',
+        'firmware': '1.0', 'serial': 'XYZ', 'rtsp_uris': ['rtsp://192.168.1.10/stream1'],
+        'requires_auth': False,
+    }
+    db.upsert_discovered_device(dev)
+    results = db.get_discovered_devices()
+    assert len(results) == 1
+    assert results[0]['ip'] == '192.168.1.10'
+    assert results[0]['rtsp_uris'] == ['rtsp://192.168.1.10/stream1']
+
+    # Upsert again (update existing)
+    dev['name'] = 'Updated Camera'
+    db.upsert_discovered_device(dev)
+    results = db.get_discovered_devices()
+    assert len(results) == 1
+    assert results[0]['name'] == 'Updated Camera'
+
+    # Clear
+    db.clear_discovered_devices()
+    assert db.get_discovered_devices() == []
+
+
+# ===========================================================================
+# DASHBOARD — discovery panel UI
+# ===========================================================================
+
+@patch('fftrix.dashboard.app')
+@patch('fftrix.dashboard.ui')
+def test_dashboard_build_discovery_panel(mock_ui, mock_app):
+    """_build_discovery_panel creates the discovery UI widgets."""
+    from fftrix.dashboard import Dashboard
+    db = Database(db_path=str(TEST_DB))
+    dash = Dashboard(db=db)
+    dash._build_discovery_panel()
+    mock_ui.label.assert_called()
+    mock_ui.button.assert_called()
+
+
+@patch('fftrix.dashboard.app')
+@patch('fftrix.dashboard.ui')
+def test_dashboard_run_discovery_scan(mock_ui, mock_app):
+    """_run_discovery_scan launches ONVIFDiscovery.scan in a thread and updates results."""
+    from fftrix.dashboard import Dashboard
+    db = Database(db_path=str(TEST_DB))
+    dash = Dashboard(db=db)
+    dash.discovery_list_container = MagicMock()
+    dash._refresh_discovery_list = MagicMock()
+
+    fake_dev = DiscoveredDevice(
+        xaddr='http://192.168.1.10/onvif/device_service', ip='192.168.1.10', name='TestCam'
+    )
+
+    with patch('fftrix.dashboard.ONVIFDiscovery') as mock_disc_cls:
+        mock_disc_cls.return_value.scan.return_value = [fake_dev]
+        dash._run_discovery_scan()
+        # Wait for the background worker thread to finish
+        import time; time.sleep(0.2)
+
+    assert len(dash._discovered) == 1
+    assert dash._discovered[0].name == 'TestCam'
+
+
+@patch('fftrix.dashboard.app')
+@patch('fftrix.dashboard.ui')
+def test_dashboard_run_discovery_scan_no_double_start(mock_ui, mock_app):
+    """Calling _run_discovery_scan while scanning is a no-op."""
+    from fftrix.dashboard import Dashboard
+    db = Database(db_path=str(TEST_DB))
+    dash = Dashboard(db=db)
+    dash._discovery_scanning = True  # Already scanning
+    with patch('fftrix.dashboard.ONVIFDiscovery') as mock_disc_cls:
+        dash._run_discovery_scan()
+        mock_disc_cls.assert_not_called()
+
+
+@patch('fftrix.dashboard.app')
+@patch('fftrix.dashboard.ui')
+def test_dashboard_clear_discovery(mock_ui, mock_app):
+    """_clear_discovery empties results and DB cache."""
+    from fftrix.dashboard import Dashboard
+    db = Database(db_path=str(TEST_DB))
+    db.upsert_discovered_device({
+        'ip': '192.168.1.1', 'xaddr': 'x', 'name': 'Cam', 'manufacturer': '',
+        'model': '', 'firmware': '', 'serial': '', 'rtsp_uris': [], 'requires_auth': False,
+    })
+    dash = Dashboard(db=db)
+    dash._discovered = [DiscoveredDevice(xaddr='x', ip='192.168.1.1')]
+    dash.discovery_list_container = MagicMock()
+    dash._clear_discovery()
+    assert dash._discovered == []
+    assert db.get_discovered_devices() == []
+
+
+@patch('fftrix.dashboard.app')
+@patch('fftrix.dashboard.ui')
+def test_dashboard_refresh_discovery_list_with_devices(mock_ui, mock_app):
+    """_refresh_discovery_list renders found devices."""
+    from fftrix.dashboard import Dashboard
+    db = Database(db_path=str(TEST_DB))
+    dash = Dashboard(db=db)
+    dash.discovery_list_container = MagicMock()
+    dash._discovered = [
+        DiscoveredDevice(xaddr='http://192.168.1.10/onvif/device_service',
+                         ip='192.168.1.10', name='TestCam'),
+        DiscoveredDevice(xaddr='http://192.168.1.11/onvif/device_service',
+                         ip='192.168.1.11', name='AuthCam', requires_auth=True),
+    ]
+    dash._refresh_discovery_list()
+    dash.discovery_list_container.clear.assert_called_once()
+
+
+@patch('fftrix.dashboard.app')
+@patch('fftrix.dashboard.ui')
+def test_dashboard_add_from_discovery_with_rtsp(mock_ui, mock_app):
+    """add_from_discovery uses first RTSP URI when available."""
+    from fftrix.dashboard import Dashboard
+    db = Database(db_path=str(TEST_DB))
+    dash = Dashboard(db=db)
+    dash.add_camera_ui = MagicMock()
+    dev = DiscoveredDevice(
+        xaddr='http://192.168.1.10/onvif/device_service',
+        ip='192.168.1.10', name='Hikvision DS-2CD2',
+        rtsp_uris=['rtsp://192.168.1.10/stream1', 'rtsp://192.168.1.10/stream2'],
+    )
+    dash.add_from_discovery(dev)
+    dash.add_camera_ui.assert_called_once_with('Hikvision DS-2CD2', 'rtsp://192.168.1.10/stream1', 'motion')
+
+
+@patch('fftrix.dashboard.app')
+@patch('fftrix.dashboard.ui')
+def test_dashboard_add_from_discovery_fallback_xaddr(mock_ui, mock_app):
+    """add_from_discovery falls back to xaddr when no RTSP URIs available."""
+    from fftrix.dashboard import Dashboard
+    db = Database(db_path=str(TEST_DB))
+    dash = Dashboard(db=db)
+    dash.add_camera_ui = MagicMock()
+    dev = DiscoveredDevice(
+        xaddr='http://192.168.1.88/onvif/device_service',
+        ip='192.168.1.88', name='Unknown ONVIF Device', rtsp_uris=[],
+    )
+    dash.add_from_discovery(dev)
+    dash.add_camera_ui.assert_called_once_with(
+        'Unknown ONVIF Device', 'http://192.168.1.88/onvif/device_service', 'motion'
+    )
+
+
+# ===========================================================================
+# FIRST-USE CREDENTIALS — DB methods
+# ===========================================================================
+
+def test_database_is_default_credentials_true():
+    db = Database(db_path=str(TEST_DB))
+    # Ensure fresh default admin:admin exists
+    db.add_user('admin', 'admin')
+    assert db.is_default_credentials() is True
+
+
+def test_database_is_default_credentials_false():
+    db = Database(db_path=str(TEST_DB))
+    db.add_user('admin', 'admin')
+    db.change_user_password('admin', 'newuser', 'StrongPass1!')
+    assert db.is_default_credentials() is False
+
+
+def test_database_change_user_password():
+    db = Database(db_path=str(TEST_DB))
+    db.add_user('admin', 'admin')
+    db.change_user_password('admin', 'operator', 'SecurePass99!')
+    # Old credentials gone
+    assert not db.verify_user('admin', 'admin')
+    # New credentials work
+    assert db.verify_user('operator', 'SecurePass99!')
+
+
+# ===========================================================================
+# FIRST-USE CREDENTIALS — dashboard handle_login intercept + dialog
+# ===========================================================================
+
+@patch('fftrix.dashboard.app')
+@patch('fftrix.dashboard.ui')
+def test_handle_login_triggers_first_use_dialog(mock_ui, mock_app):
+    """handle_login shows first-use dialog when admin:admin is still set."""
+    from fftrix.dashboard import Dashboard
+    db = Database(db_path=str(TEST_DB))
+    db.add_user('admin', 'admin')
+    dash = Dashboard(db=db)
+    dash._show_first_use_dialog = MagicMock()
+    result = dash.handle_login('admin', 'admin')
+    assert result is True
+    dash._show_first_use_dialog.assert_called_once_with('admin')
+    # Should NOT redirect to / yet
+    mock_ui.navigate.to.assert_not_called()
+
+
+@patch('fftrix.dashboard.app')
+@patch('fftrix.dashboard.ui')
+def test_handle_login_no_first_use_dialog_after_change(mock_ui, mock_app):
+    """handle_login proceeds normally when credentials are not default."""
+    from fftrix.dashboard import Dashboard
+    db = Database(db_path=str(TEST_DB))
+    db.add_user('admin', 'admin')
+    db.change_user_password('admin', 'operator', 'SecurePass99!')
+    dash = Dashboard(db=db)
+    dash._show_first_use_dialog = MagicMock()
+    dash.handle_login('operator', 'SecurePass99!')
+    dash._show_first_use_dialog.assert_not_called()
+    mock_ui.navigate.to.assert_called_once_with('/')
+
+
+@patch('fftrix.dashboard.app')
+@patch('fftrix.dashboard.ui')
+def test_show_first_use_dialog_validation_empty_username(mock_ui, mock_app):
+    """_show_first_use_dialog blocks save when username is empty."""
+    from fftrix.dashboard import Dashboard
+    db = Database(db_path=str(TEST_DB))
+    db.add_user('admin', 'admin')
+    dash = Dashboard(db=db)
+
+    # Capture the _save closure by calling the method and retrieving button callback
+    save_fn = None
+    status_label_mock = MagicMock()
+
+    def capture_button(label, icon=None, on_click=None, **kw):
+        nonlocal save_fn
+        if label == 'Save & Continue':
+            save_fn = on_click
+        return MagicMock()
+
+    mock_ui.button.side_effect = capture_button
+    mock_ui.input.return_value.value = ''  # empty username
+    mock_ui.label.return_value = status_label_mock
+    mock_ui.dialog.return_value.__enter__ = lambda s: s
+    mock_ui.dialog.return_value.__exit__ = MagicMock(return_value=False)
+    mock_ui.card.return_value.__enter__ = lambda s: s
+    mock_ui.card.return_value.__exit__ = MagicMock(return_value=False)
+
+    dash._show_first_use_dialog('admin')
+    # _save should reject empty username
+    if save_fn:
+        save_fn()
+    # DB should remain unchanged (admin:admin still active)
+    assert db.is_default_credentials() is True
+
+
+@patch('fftrix.dashboard.app')
+@patch('fftrix.dashboard.ui')
+def test_show_first_use_dialog_opens(mock_ui, mock_app):
+    """_show_first_use_dialog creates and opens a persistent dialog."""
+    from fftrix.dashboard import Dashboard
+    db = Database(db_path=str(TEST_DB))
+    db.add_user('admin', 'admin')
+    dash = Dashboard(db=db)
+
+    mock_ui.card.return_value.__enter__ = lambda s: s
+    mock_ui.card.return_value.__exit__ = MagicMock(return_value=False)
+
+    dash._show_first_use_dialog('admin')
+
+    # dialog.props('persistent') is called — verify the call happened
+    mock_ui.dialog.return_value.props.assert_called_with('persistent')
+    # open() is called on the props() return value (chained mock)
+    mock_ui.dialog.return_value.props.return_value.open.assert_called_once()

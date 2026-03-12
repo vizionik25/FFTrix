@@ -17,3 +17,7 @@ recordings/
 
 # Database
 fftrix_system.db
+
+# Environment variables
+.env
+

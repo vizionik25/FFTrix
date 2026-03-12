@@ -1,6 +1,6 @@
 [project]
 name = "fftrix"
-version = "1.0.1"
+version = "1.1.0"
 description = "A tool for processing video files using opencv numpy matplotlib vidgear pyffmpeg moviepy and vidgear."
 readme = "README.md"
 authors = [
@@ -13,11 +13,13 @@ dependencies = [
     "moviepy>=2.2.1",
     "nicegui>=3.8.0",
     "numpy>=2.4.3",
+    "onvif-zeep>=0.2.12",
     "opencv-contrib-python>=4.13.0.92",
     "pyffmpeg>=2.5.2.3.2",
     "pyngrok>=7.5.1",
     "pytesseract>=0.3.13",
     "vidgear>=0.3.4",
+    "wsdiscovery>=2.1.2",
 ]
 
 [project.scripts]

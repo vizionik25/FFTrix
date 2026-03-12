@@ -4,12 +4,14 @@ import base64
 import os
 import time
 import json
+import threading
 import warnings
 from nicegui import ui, app
 from fastapi.responses import RedirectResponse
 from .database import Database, RECORDINGS_DIR
 from .engine import CameraNode
 from .analytics import AnalyticsPipeline
+from .discovery import ONVIFDiscovery, DiscoveredDevice
 
 class Dashboard:
     def __init__(self, db=None, analytics=None):
@@ -21,6 +23,8 @@ class Dashboard:
         self.is_drawing_zone = False
         self.temp_zone_start = None
         self._timeline_tick = 0
+        self._discovered: list[DiscoveredDevice] = []
+        self._discovery_scanning = False
 
         self._setup_routes()
 
@@ -57,6 +61,10 @@ class Dashboard:
     def handle_login(self, username, password):
         if self.db.verify_user(username, password):
             app.storage.user.update({'authenticated': True, 'username': username})
+            if self.db.is_default_credentials():
+                # Keep them on the login page until they change defaults
+                self._show_first_use_dialog(username)
+                return True
             ui.navigate.to('/')
             return True
         ui.notify('Invalid credentials', type='negative')
@@ -65,6 +73,50 @@ class Dashboard:
     def handle_logout(self):
         app.storage.user.update({'authenticated': False})
         ui.navigate.to('/login')
+
+    def _show_first_use_dialog(self, old_username: str = 'admin'):
+        """Show a non-dismissable dialog forcing the user to change default credentials."""
+        dialog = ui.dialog().props('persistent')  # persistent = cannot close by clicking outside
+        with dialog, ui.card().classes('q-pa-lg').style('min-width:380px'):
+            ui.label('🔒 Security Setup Required').classes('text-h6 text-bold text-negative')
+            ui.label(
+                'You are using the default admin credentials. '
+                'You must set a unique username and password before continuing.'
+            ).classes('text-body2 text-grey-6 q-mb-md')
+
+            new_user_in = ui.input('New Username').props('outlined dense')
+            new_pass_in = ui.input('New Password', password=True, password_toggle_button=True
+                                   ).props('outlined dense')
+            confirm_pass_in = ui.input('Confirm Password', password=True, password_toggle_button=True
+                                       ).props('outlined dense')
+            status_label = ui.label('').classes('text-caption text-negative')
+
+            def _save():
+                uname = new_user_in.value.strip()
+                pw = new_pass_in.value
+                cpw = confirm_pass_in.value
+                if not uname:
+                    status_label.set_text('Username cannot be empty.')
+                    return
+                if uname == 'admin' and pw == 'admin':
+                    status_label.set_text('You must choose different credentials.')
+                    return
+                if len(pw) < 8:
+                    status_label.set_text('Password must be at least 8 characters.')
+                    return
+                if pw != cpw:
+                    status_label.set_text('Passwords do not match.')
+                    return
+                self.db.change_user_password(old_username, uname, pw)
+                app.storage.user.update({'username': uname})
+                dialog.close()
+                ui.notify('✅ Credentials updated — you\'re all set!', type='positive')
+                ui.navigate.to('/')
+
+            ui.button('Save & Continue', icon='lock', on_click=_save
+                      ).classes('full-width bg-positive text-white q-mt-sm')
+        dialog.open()
+
 
     def handle_viewport_click(self, e):
         if not self.selected_cam_id or not self.is_drawing_zone: return
@@ -140,6 +192,10 @@ class Dashboard:
             self.controls_container = ui.column().classes('w-full')
             self._refresh_controls()
 
+            ui.separator()
+            self._build_discovery_panel()
+
+
     def _refresh_camera_list(self):
         if not hasattr(self, 'camera_list_container') or self.camera_list_container is None:
             return
@@ -200,6 +256,89 @@ class Dashboard:
     def _build_grid(self):
         self.grid_container = ui.grid(columns=self.grid_columns).classes('flex-grow')
         self._refresh_grid()
+
+    def _build_discovery_panel(self):
+        """Render the ONVIF auto-discovery section in the sidebar."""
+        ui.label('🔍 ONVIF Discovery').classes('text-subtitle1 text-bold')
+        self._disc_user_in = ui.input('Username (opt.)').props('outlined dense')
+        self._disc_pass_in = ui.input('Password (opt.)', password=True).props('outlined dense')
+        self._disc_timeout_sel = ui.select(
+            options=[3, 5, 10, 15], value=5, label='Timeout (s)'
+        ).props('outlined dense')
+        with ui.row().classes('full-width'):
+            self._disc_scan_btn = ui.button(
+                'Scan Network', icon='radar',
+                on_click=self._run_discovery_scan
+            ).classes('flex-grow')
+            ui.button(icon='clear', on_click=self._clear_discovery).props('flat dense')
+        self.discovery_list_container = ui.column().classes('w-full')
+        self._refresh_discovery_list()
+
+    def _run_discovery_scan(self):
+        """Launch a WS-Discovery scan in a background thread."""
+        if self._discovery_scanning:
+            return
+        self._discovery_scanning = True
+        if hasattr(self, '_disc_scan_btn'):
+            self._disc_scan_btn.props('loading')
+
+        username = getattr(self, '_disc_user_in', None)
+        password = getattr(self, '_disc_pass_in', None)
+        timeout = getattr(self, '_disc_timeout_sel', None)
+        u = username.value if username else ''
+        p = password.value if password else ''
+        t = timeout.value if timeout else 5
+
+        def _scan_worker():
+            discovery = ONVIFDiscovery()
+            results = discovery.scan(timeout=t, username=u, password=p)
+            # Cache all results in DB
+            for dev in results:
+                self.db.upsert_discovered_device(dev.to_dict())
+            self._discovered = results
+            self._discovery_scanning = False
+            if hasattr(self, '_disc_scan_btn'):
+                self._disc_scan_btn.props(remove='loading')
+            self._refresh_discovery_list()
+
+        threading.Thread(target=_scan_worker, daemon=True).start()
+
+    def _clear_discovery(self):
+        """Clear scan results from memory and DB cache."""
+        self._discovered = []
+        self.db.clear_discovered_devices()
+        self._refresh_discovery_list()
+
+    def _refresh_discovery_list(self):
+        """Redraw the discovery results list."""
+        if not hasattr(self, 'discovery_list_container') or self.discovery_list_container is None:
+            return
+        self.discovery_list_container.clear()
+        # Show cached DB results if no live results yet
+        devices = self._discovered or [
+            DiscoveredDevice.from_dict(d) for d in self.db.get_discovered_devices()
+        ]
+        with self.discovery_list_container:
+            if not devices:
+                ui.label('No devices found. Run a scan.').classes('text-caption text-grey')
+                return
+            for dev in devices:
+                with ui.card().classes('w-full q-mb-xs'):
+                    with ui.row().classes('items-center'):
+                        icon = 'videocam' if not dev.requires_auth else 'lock'
+                        ui.icon(icon).classes('text-primary')
+                        with ui.column().classes('flex-grow'):
+                            ui.label(dev.name).classes('text-caption text-bold')
+                            ui.label(dev.ip).classes('text-caption text-grey')
+                            if dev.requires_auth:
+                                ui.label('⚠ Requires credentials').classes('text-caption text-warning')
+                        ui.button(icon='add', on_click=lambda d=dev: self.add_from_discovery(d)
+                                  ).props('flat dense color=positive')
+
+    def add_from_discovery(self, device: DiscoveredDevice):
+        """Pre-fill add_camera_ui with the best RTSP URI from a discovered device."""
+        rtsp = device.rtsp_uris[0] if device.rtsp_uris else device.xaddr
+        self.add_camera_ui(device.name, rtsp, 'motion')
 
     def _refresh_grid(self):
         if not hasattr(self, 'grid_container') or self.grid_container is None:
