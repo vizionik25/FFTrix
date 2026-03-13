@@ -6,6 +6,8 @@ import time
 import json
 import threading
 import warnings
+import subprocess
+import shutil
 from pathlib import Path
 from nicegui import ui, app
 from fastapi.responses import RedirectResponse
@@ -614,6 +616,73 @@ def _add_pwa_head_tags():
     )
 
 
+def _generate_angie_config(port: int):
+    """Generate a secure Angie (NGINX) configuration template for ingress."""
+    config = f"""# Angie (NGINX) Configuration for FFTrix Ingress
+server {{
+    listen 80;
+    server_name _;
+
+    # Increase body size for potential large file uploads/API requests
+    client_max_body_size 50M;
+
+    location / {{
+        proxy_pass http://127.0.0.1:{port};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # WebSocket support (Critical for NiceGUI/FastAPI)
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        
+        # Security headers
+        add_header X-Frame-Options "SAMEORIGIN";
+        add_header X-XSS-Protection "1; mode=block";
+        add_header X-Content-Type-Options "nosniff";
+    }}
+}}
+"""
+    from .database import FFTRIX_HOME
+    conf_path = FFTRIX_HOME / "angie.conf"
+    if not conf_path.exists():
+        conf_path.write_text(config)
+        print(f"✅ Generated {conf_path} for Angie ingress.")
+
+
+def _setup_remote_access(port: int):
+    """Securely expose the dashboard via Tailscale Funnel and Angie."""
+    # 1. Generate Angie config if it doesn't exist
+    _generate_angie_config(port)
+
+    # 2. Attempt to start Tailscale Funnel (Secure Egress/Tunnel)
+    if shutil.which("tailscale"):
+        try:
+            # Optional: Automatic authentication if TS_AUTHKEY is provided
+            auth_key = os.environ.get("TS_AUTHKEY")
+            if auth_key:
+                subprocess.run(["tailscale", "up", "--authkey", auth_key], 
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # We run it in the background. 
+            # Note: In production, users should manage this via systemd or similar.
+            subprocess.Popen(["tailscale", "funnel", str(port)],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            print(f"🚀 Tailscale Funnel active on port {port}")
+        except Exception as e:
+            warnings.warn(f"Tailscale Funnel failed: {e}")
+    else:
+        warnings.warn("Tailscale CLI not found. Please install Tailscale for secure remote access.")
+
+    # 3. Inform user about Angie
+    if shutil.which("angie"):
+        from .database import FFTRIX_HOME
+        print(f"🛡️ Angie detected. Recommend running: 'sudo angie -c {FFTRIX_HOME}/angie.conf'")
+
+
 def run_dashboard(remote=False):
     secret = os.environ.get("FFTRIX_SECRET_KEY")
     if not secret:
@@ -629,11 +698,7 @@ def run_dashboard(remote=False):
     host = os.environ.get("FFTRIX_HOST", "0.0.0.0")
 
     if remote:
-        try:
-            from pyngrok import ngrok
-            ngrok.connect(port)
-        except Exception:
-            pass
+        _setup_remote_access(port)
 
     db = Database()
     alert_manager = AlertManager()

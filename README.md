@@ -10,7 +10,7 @@ FFTrix is a professional-grade, multi-threaded NVR (Network Video Recorder), AI 
 - **Smart Zoning & Alerts:** Draw custom security boundaries directly on the video feed to trigger **Email and Webhook** notifications on high-value intrusions.
 - **Enterprise DVR:** Automated 24/7 continuous recording with intelligent event flagging, **time-ranged Clip Exports**, and **Auto-Retention cleanup policies**.
 - **Professional Watermarking:** Customizable static or dynamic (floating) alpha-blended text and image overlays for branding and anti-theft.
-- **Secure Remote Access:** Built-in Zero-Trust tunneling (via pyngrok) and session-based authentication for worldwide secure monitoring.
+- **Secure Remote Access:** Built-in Zero-Trust tunneling (via Tailscale Funnel & Angie) and session-based authentication for worldwide secure monitoring.
 - **Dynamic Surveillance Matrix:** Scalable 1x1 to 4x4 hardware-accelerated monitoring grid.
 
 ## 🛠 Tech Stack

@@ -16,6 +16,7 @@ from fftrix.analytics import AnalyticsPipeline, WatermarkEngine
 from fftrix.engine import CameraNode
 from fftrix.__main__ import cli, handle_serve, handle_user_add
 from fftrix import main as init_main
+from fftrix.dashboard import _generate_angie_config
 from click.testing import CliRunner
 
 TEST_HOME = Path("./test_fftrix_home")
@@ -29,6 +30,20 @@ def setup_teardown():
     (TEST_HOME / "snapshots").mkdir()
     yield
     if TEST_HOME.exists(): shutil.rmtree(TEST_HOME)
+
+
+# ===========================================================================
+# REMOTE ACCESS
+# ===========================================================================
+
+def test_generate_angie_config():
+    with patch("fftrix.database.FFTRIX_HOME", TEST_HOME):
+        _generate_angie_config(8080)
+        conf_path = TEST_HOME / "angie.conf"
+        assert conf_path.exists()
+        content = conf_path.read_text()
+        assert "proxy_pass http://127.0.0.1:8080;" in content
+        assert "server_name _;" in content
 
 
 # ===========================================================================

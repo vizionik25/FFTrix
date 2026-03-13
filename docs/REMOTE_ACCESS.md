@@ -36,7 +36,7 @@ fftrix user delete [username]
 
 ## 🌍 Zero-Trust Remote Access
 
-FFTrix can be exposed to the public internet securely without opening ports on your router.
+FFTrix can be exposed to the public internet securely without opening ports on your router, utilizing a combination of **Tailscale Funnel** for secure egress/tunnelling and **Angie (NGINX)** for secured ingress.
 
 ### Deploying the Secure Tunnel:
 ```bash
@@ -44,9 +44,23 @@ fftrix serve --remote
 ```
 
 ### How the Tunnel Works:
-1. **Encrypted Reverse Proxy:** FFTrix uses `pyngrok` to create a secure tunnel between your local machine and the public internet.
-2. **Dynamic URL:** A unique HTTPS URL is generated upon launch. This URL is the only entry point to your server.
-3. **NAT Bypass:** This method works even behind strict firewalls and CGNAT, as the connection is established from the *inside* out.
+1. **Secure Egress (Tailscale):** FFTrix uses Tailscale Funnel to create an encrypted tunnel from your node to the Tailscale edge. This bypasses NAT and CGNAT without requiring port forwarding.
+2. **Secured Ingress (Angie):** The system generates an `angie.conf` configuration in your `~/.fftrix/` directory. Angie acts as a high-performance reverse proxy, providing an additional layer of security, WebSocket optimization, and header hardening.
+3. **Global DNS:** Your server becomes accessible via your unique Tailnet DNS name (e.g., `https://your-node.tailnet-name.ts.net`).
+
+### Optional: Automatic Authentication
+If you are deploying in a headless environment or container, you can provide a `TS_AUTHKEY` in your `.env` file. FFTrix will automatically attempt to authenticate and bring the Tailscale node online before starting the Funnel.
+
+```bash
+# .env
+TS_AUTHKEY=tskey-auth-xxxxxx
+```
+
+### Manual Ingress Setup (Optional):
+If you have **Angie** installed on your system, you can manually launch the ingress proxy with the generated configuration found in your home directory:
+```bash
+sudo angie -c ~/.fftrix/angie.conf
+```
 
 ---
 
