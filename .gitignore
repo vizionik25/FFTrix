@@ -82,3 +82,7 @@ swarm-config.yaml
 .ruff_cache/
 .pyre/
 .pytype/
+
+# SSL Cert
+*.pem
+

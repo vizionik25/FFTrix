@@ -86,7 +86,7 @@ class CameraNode:
                 self.dropped_frames += 1
                 continue
             
-            # AI Processing
+            # Processing
             try:
                 proc, triggered = self.analytics.process(frame, self.id)
                 self.processed_frame = proc

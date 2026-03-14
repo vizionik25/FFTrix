@@ -1,6 +1,6 @@
 """FFTrix — Enterprise NVR, AI Surveillance and Streaming Server."""
 
-__version__ = "1.0.1"
+__version__ = "1.4.0"
 __all__ = [
     "main", "Database", "AnalyticsPipeline", "CameraNode", "Dashboard",
     "ONVIFDiscovery", "DiscoveredDevice",

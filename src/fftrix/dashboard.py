@@ -8,6 +8,7 @@ import threading
 import warnings
 import subprocess
 import shutil
+import uvicorn
 from pathlib import Path
 from nicegui import ui, app
 from fastapi.responses import RedirectResponse
@@ -18,6 +19,9 @@ from .alerts import AlertManager
 from .retention import RetentionManager
 from .discovery import ONVIFDiscovery, DiscoveredDevice
 from .clipper import ClipExporter
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class Dashboard:
     def __init__(self, db=None, analytics=None):
@@ -618,32 +622,51 @@ def _add_pwa_head_tags():
 
 def _generate_angie_config(port: int):
     """Generate a secure Angie (NGINX) configuration template for ingress."""
-    config = f"""# Angie (NGINX) Configuration for FFTrix Ingress
-server {{
-    listen 80;
-    server_name _;
+    config = """events {
+    worker_connections 1024;
+}
 
-    # Increase body size for potential large file uploads/API requests
-    client_max_body_size 50M;
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
 
-    location / {{
-        proxy_pass http://127.0.0.1:{port};
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+    # Basic optimization
+    sendfile        on;
+    tcp_nopush      on;
+    tcp_nodelay     on;
+    keepalive_timeout  65;
+    types_hash_max_size 2048;
 
-        # WebSocket support (Critical for NiceGUI/FastAPI)
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        
-        # Security headers
-        add_header X-Frame-Options "SAMEORIGIN";
-        add_header X-XSS-Protection "1; mode=block";
-        add_header X-Content-Type-Options "nosniff";
-    }}
-}}
+    # Gzip compression
+    gzip on;
+    gzip_disable "msie6";
+
+    server {
+        listen 80;
+        server_name _;
+
+        # Increase body size for potential large file uploads/API requests
+        client_max_body_size 50M;
+
+        location / {
+            proxy_pass http://localhost:8080;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+
+            # WebSocket support (Critical for NiceGUI/FastAPI)
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            
+            # Security headers
+            add_header X-Frame-Options "SAMEORIGIN";
+            add_header X-XSS-Protection "1; mode=block";
+            add_header X-Content-Type-Options "nosniff";
+        }
+    }
+}
 """
     from .database import FFTRIX_HOME
     conf_path = FFTRIX_HOME / "angie.conf"
@@ -663,7 +686,7 @@ def _setup_remote_access(port: int):
             # Optional: Automatic authentication if TS_AUTHKEY is provided
             auth_key = os.environ.get("TS_AUTHKEY")
             if auth_key:
-                subprocess.run(["tailscale", "up", "--authkey", auth_key], 
+                subprocess.run(["tailscale", "cert", "--cert-file", "{FFTRIX_HOME}/fullchain.pem", "--key-file", "{FFTRIX_HOME}/privkey.pem", "{TS_FUNNEL_URL}", "up", "--authkey", auth_key],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             # We run it in the background. 
